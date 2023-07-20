@@ -14,10 +14,10 @@ Client-side JIT and code lifter for Arkouda, based on Numba. Basic example:
 
     ak.connect(connect_url=os.getenv('ARKOUDA_URL'))
 
-    @arkjit.optimize()
+    @arkjit.optimize()       # enable client-side JIT
     def calc():
         A = ak.arange(10)
-        B = A*A + A*A
+        B = A*A + A*A        # common sub-expression will be eliminated
         return B
 
     try:
