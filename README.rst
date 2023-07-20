@@ -3,7 +3,29 @@
 arkouda_jit: Numba-based JIT for Arkouda
 ========================================
 
-Client-side JIT and code lifter for Arkouda, based on Numba.
+Client-side JIT and code lifter for Arkouda, based on Numba. Basic example:
+
+.. code-block:: python
+
+    import arkouda as ak
+    import arkjit
+
+    import os
+
+    ak.connect(connect_url=os.getenv('ARKOUDA_URL'))
+
+    @arkjit.optimize()
+    def calc():
+        A = ak.arange(10)
+        B = A*A + A*A
+        return B
+
+    try:
+        B = calc()
+        print(B)
+    finally:
+        ak.disconnect()
+        pass
 
 ----
 
