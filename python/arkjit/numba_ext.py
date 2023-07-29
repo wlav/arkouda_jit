@@ -8,7 +8,10 @@ import inspect
 import operator
 import typing as py_typing
 
+import numpy as np
+
 import numba
+
 import numba.extending as nb_ext
 import numba.core.cgutils as nb_cgu
 import numba.core.compiler as nb_cmp
@@ -36,45 +39,55 @@ ir_byte     = ir.IntType(8)
 ir_voidptr  = ir.PointerType(ir_byte)                 # by convention
 ir_byteptr  = ir_voidptr                              # for clarity
 
-def py2numba(t: nb_types.Type) -> type:
+def type_remap(t: nb_types.Type) -> type:
     if isinstance(t, nb_types.Integer):
         return nb_types.Integer
     if isinstance(t, nb_types.Float):
         return nb_types.Float
     return t
 
-keyword_placeholder = nb_types.PyObject('keyword')
+class KeywordPlaceholder(nb_types.PyObject):
+    pass
+
+
+def register_type(pytype, identifier):
+    @nb_ext.typeof_impl.register(pytype)
+    def typeof_index(val, c) -> nb_types.Type:
+        return identifier
+
+    return identifier
 
 
 # -- pdarray typing ---------------------------------------------------------
 
 #
+# fake type to shuttle arbitrary instances
+#
+
+class OpaquePyType(nb_types.Type):
+    known_types = set()
+
+    def __init__(self) -> None:
+        super(OpaquePyType, self).__init__(name='OpaquePyObject')
+
+opaque_py_type = OpaquePyType()
+
+
+#
 # main arkouda types
 #
+
 class PDArrayType(nb_types.Type):
     def __init__(self) -> None:
         super(PDArrayType, self).__init__(name='PDArray')
 
-class DTypeType(nb_types.PyObject):    # Arkouda used numpy's dtype class
-    def __init__(self) -> None:
-        super(DTypeType, self).__init__(name='DType')
+pdarray_type = register_type(ak.pdarrayclass.pdarray, PDArrayType())
 
-    def is_precise(self) -> bool:
-        return True                    # b/c considered constants
-
-
-def register(arkouda_type, numba_type):
-    t = numba_type()
-
-    @nb_ext.typeof_impl.register(arkouda_type)
-    def typeof_index(val, c) -> nb_types.Type:
-        return t
-
-    nb_ext.as_numba_type.register(arkouda_type, t)
-    return t
-
-pdarray_type = register(ak.pdarrayclass.pdarray, PDArrayType)
-dtype_type   = register(type(ak.float64), DTypeType)
+# dtype comes from numpy, where it is a constant; we need it as a variable
+# type such that it can be passed as keyword arguments (this is necessary
+# b/c the main pdarray creation function requires kwds  and can not unfold)
+# TODO: should probably reject dtypes not loaded from the arkouda module
+register_type(np.dtype, opaque_py_type)
 
 
 #
@@ -105,7 +118,8 @@ def pda_signature(kind, return_type: nb_types.Type, fargs: py_typing.Tuple,
               # we have the actual types, so unroll them instead
                 parms = [
                     inspect.Parameter(f'arg{i}', inspect.Parameter.POSITIONAL_ONLY)
-                    for i in range(len(fargs)-len(fkwds))]
+                    for i in range(len(fargs)-len(fkwds))
+                ]
 
               # Numba will try to place the keywords arguments as parameters and can
               # not handle passing the keywords as a simple dict, so fake it (this
@@ -133,12 +147,12 @@ def create_creator_overload(func: py_typing.Callable) -> None:
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
           # keywords are passed, unrolled, through additional PyObject* arguments
             if kwds:
-                args = args + (keyword_placeholder,)*len(kwds)
+                args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
 
           # register a creator lowering implementation for the given argument
           # types (which are assumed to be correct)
             decorate = nb_iutils.lower_builtin(
-                func, *tuple(py2numba(x) for x in args))
+                func, *tuple(type_remap(x) for x in args))
             decorate(create_creator_lowering(func))
 
             return pda_signature(
@@ -172,10 +186,10 @@ class PDArrayBinOpTrueDiv(PDArrayBinOp):
 
 
 # -- arkouda types lowering -------------------------------------------------
-class PyObjectModel(nb_ext.models.PrimitiveModel):
+class CapsuleModel(nb_ext.models.PrimitiveModel):
     def __init__(self, dmm, fe_type):
         be_type = ir_voidptr
-        super(PyObjectModel, self).__init__(dmm, fe_type, be_type)
+        super(CapsuleModel, self).__init__(dmm, fe_type, be_type)
 
 def box_pyobject(typ, val, c):
     ptr = nb_cgu.alloca_once(c.builder, c.pyapi.pyobj)
@@ -183,15 +197,24 @@ def box_pyobject(typ, val, c):
     return c.builder.load(ptr)
 
 def register_aspyobject_model(numba_type):
-    nb_ext.register_model(numba_type)(PyObjectModel)
+    nb_ext.register_model(numba_type)(CapsuleModel)
     nb_ext.box(numba_type)(box_pyobject)
 
 register_aspyobject_model(PDArrayType)
-register_aspyobject_model(DTypeType)
+register_aspyobject_model(OpaquePyType)
 
-# dtype special case when used as a keyword (eg. for arange())
-@nb_iutils.lower_cast(DTypeType, keyword_placeholder)
-def dtype_as_pyobject(context, builder, fromty, toty, val):
+
+@nb_iutils.lower_constant(OpaquePyType)
+def opaque_constant(context, builder, ty, pyval):
+    pyapi = context.get_python_api(builder)
+    objptr = context.add_dynamic_addr(builder, id(pyval), info=type(pyval).__name__)
+    retptr = nb_cgu.alloca_once(builder, pyapi.pyobj)
+    builder.store(objptr, retptr)
+    return builder.load(retptr)
+
+# arbitrary case of any opaque type to placeholder type
+@nb_iutils.lower_cast(OpaquePyType, KeywordPlaceholder)
+def opaque_as_placeholder(context, builder, fromty, toty, val):
     pyapi = context.get_python_api(builder)
     ptr = nb_cgu.alloca_once(builder, pyapi.pyobj)
     builder.store(val, ptr)
@@ -210,14 +233,33 @@ def create_creator_lowering(func):
         ak_name = context.insert_const_string(builder.module, 'arkouda')
         ak_mod = pyapi.import_module_noblock(ak_name)
 
-        pyargs = tuple(
-            pyapi.from_native_value(sig.args[i], args[i], None) for i in range(len(args))
-        )
+        pykwds = None
+        for iarg, arg in enumerate(sig.args):
+            if isinstance(arg, KeywordPlaceholder):
+              # has keywords, split non-keywords and put all keywords in a dict
+                pykwds = pyapi.dict_new()
+                for sigarg, kwarg in zip(sig.args[iarg:], args[iarg:]):
+                    pyapi.dict_setitem_string(pykwds, sigarg.name, kwarg)
+                rl_args = args[:iarg]
+                break
+        else:
+          # no keywords case
+            rl_args = args
 
-        pda = pyapi.call_method(ak_mod, func.__name__, pyargs)
-        pyapi.incref(pda)
+        pyargs = pyapi.tuple_new(len(rl_args))
+        for iarg, arg in enumerate(rl_args):
+            pyargb = pyapi.from_native_value(sig.args[iarg], arg, None)
+            pyapi.tuple_setitem(pyargs, iarg, pyargb)
 
+        pyf = pyapi.object_getattr_string(ak_mod, func.__name__)
+        pda = pyapi.call(pyf, pyargs, pykwds)
+
+        pyapi.decref(pyf)
+        pyapi.decref(pyargs)
+        if pykwds is not None:
+            pyapi.decref(pykwds)
         pyapi.decref(ak_mod)
+
         pyapi.gil_release(gil_state)
 
       # return result as a void ptr
