@@ -58,6 +58,84 @@ def register_type(pytype, identifier):
     return identifier
 
 
+# -- general function inliner -----------------------------------------------
+def _dummy():
+    pass
+
+class InlineFunctionType(nb_types.FunctionType):
+    def __init__(self, sig, disp):
+        super(InlineFunctionType, self).__init__(sig)
+        self.dispatcher = disp
+
+@nb_ext.register_model(InlineFunctionType)
+class InlineFunctionModel(nb_ext.models.StructModel):
+    """FunctionModel holds addresses of function implementations
+    """
+    def __init__(self, dmm, fe_type):
+        members = [
+            # address of cfunc wrapper function:
+            ('addr', nb_types.voidptr),
+            # address of PyObject* referencing the Python function
+            # object:
+            ('pyaddr', nb_types.voidptr),
+        ]
+        super(InlineFunctionModel, self).__init__(dmm, fe_type, members)
+
+class InlineUndefinedFunctionType(nb_types.UndefinedFunctionType):
+    def __init__(self, dispatcher):
+        pysig = inspect.signature(dispatcher.py_func)
+        super(InlineUndefinedFunctionType, self).__init__(len(pysig.parameters), [dispatcher])
+
+    def get_call_type(self, context, args, kws):
+        sig = super(InlineUndefinedFunctionType, self).get_call_type(context, args, kws)
+        assert len(self.dispatchers) == 1   # base method requires this, too
+        return sig
+
+    def get_precise(self):
+        """
+        Return precise function type if possible.
+        """
+
+        assert len(self.dispatchers) == 1   # base method requires this, too
+        for dispatcher in self.dispatchers:
+            for cres in dispatcher.overloads.values():
+                sig = nb_types.unliteral(cres.signature)
+                return InlineFunctionType(sig, dispatcher)
+        return self
+
+class TypeofInlineFunction:
+    """Automatically inline helpers written on the interactive prompt."""
+
+    def __init__(self):
+        self._is_active = False
+
+    def __enter__(self):
+        self._is_active = True
+
+    def __exit__(self, tp, val, trace):
+        self._is_active = False
+
+    def __call__(self, val, c):
+        if not self._is_active or val.__module__ != '__main__':
+            return None
+
+        disp = optimize(inline='always')(val)         # registers dispatcher
+        return InlineUndefinedFunctionType(disp)
+
+typeof_inline_function = TypeofInlineFunction()
+nb_ext.typeof_impl.register(type(_dummy))(typeof_inline_function)
+
+@nb_iutils.lower_constant(InlineFunctionType)
+def constant_inline_function(context, builder, ty, pyval):
+    disp = ty.dispatcher
+    assert disp.py_func == pyval
+
+    sfunc = nb_cgu.create_struct_proxy(ty)(context, builder)
+    sfunc.pyaddr = context.add_dynamic_addr(builder, id(disp),
+                                            info=type(disp).__name__)
+    return sfunc._getvalue()
+
+
 # -- pdarray typing ---------------------------------------------------------
 
 #
@@ -332,8 +410,12 @@ class ArkoudaFunctionPass(nb_cpl.FunctionPass):
         return "Arkouda function pass"
 
 @nb_cpl.register_pass(mutates_CFG=True, analysis_only=False)
-class ArkoudaCSEPass(nb_cpl.LoweringPass):
-    _name = "arkouda_cse_pass"
+class ArkoudaCSE(nb_cpl.LoweringPass):
+    """
+    Common Subexpression Elmination (CSE) for Arkouda operations
+    """
+
+    _name = "arkouda_cse"
 
     def __init__(self):
         super().__init__()
@@ -364,6 +446,11 @@ class ArkoudaCSEPass(nb_cpl.LoweringPass):
 # compiler which adds custom Arkouda passes
 #
 class ArkoudaCompiler(nb_cmp.CompilerBase):
+    def compile_extra(self, func):
+        with typeof_inline_function:
+            result = super(ArkoudaCompiler, self).compile_extra(func)
+        return result
+
     def define_pipelines(self):
       # start with the complete Numba pipeline
         pm = nb_cmp.DefaultPassBuilder.define_nopython_pipeline(self.state)
@@ -372,7 +459,7 @@ class ArkoudaCompiler(nb_cmp.CompilerBase):
         pm.add_pass_after(ArkoudaFunctionPass, nb_untyped_pass.IRProcessing)
 
       # common subexpression elimination, first pass after typing is done
-        pm.add_pass_after(ArkoudaCSEPass, nb_typed_pass.AnnotateTypes)
+        pm.add_pass_after(ArkoudaCSE, nb_typed_pass.AnnotateTypes)
 
         pm.finalize()
         return [pm]
@@ -385,6 +472,7 @@ def optimize(*args, **kwds):
   # object mode by default (to allow simple re-use of Arkouda's
   # pdarray class as-is to generate messages)
     kwds['pipeline_class'] = ArkoudaCompiler
-    kwds['forceobj'] = True
+    kwds['nopython' ] = True
 
+  # enable jitting for this function (actual run deferred to first call)
     return nb_dec.jit(*args, **kwds)
