@@ -27,6 +27,8 @@ import numba.core.typed_passes as nb_typed_pass
 
 from llvmlite import ir
 
+import sys
+
 
 __all__ = [
     'optimize',
@@ -62,46 +64,10 @@ def register_type(pytype, identifier):
 def _dummy():
     pass
 
-class InlineFunctionType(nb_types.FunctionType):
-    def __init__(self, sig, disp):
-        super(InlineFunctionType, self).__init__(sig)
-        self.dispatcher = disp
-
-@nb_ext.register_model(InlineFunctionType)
-class InlineFunctionModel(nb_ext.models.StructModel):
-    """FunctionModel holds addresses of function implementations
-    """
-    def __init__(self, dmm, fe_type):
-        members = [
-            # address of cfunc wrapper function:
-            ('addr', nb_types.voidptr),
-            # address of PyObject* referencing the Python function
-            # object:
-            ('pyaddr', nb_types.voidptr),
-        ]
-        super(InlineFunctionModel, self).__init__(dmm, fe_type, members)
-
 class InlineUndefinedFunctionType(nb_types.UndefinedFunctionType):
     def __init__(self, dispatcher):
         pysig = inspect.signature(dispatcher.py_func)
         super(InlineUndefinedFunctionType, self).__init__(len(pysig.parameters), [dispatcher])
-
-    def get_call_type(self, context, args, kws):
-        sig = super(InlineUndefinedFunctionType, self).get_call_type(context, args, kws)
-        assert len(self.dispatchers) == 1   # base method requires this, too
-        return sig
-
-    def get_precise(self):
-        """
-        Return precise function type if possible.
-        """
-
-        assert len(self.dispatchers) == 1   # base method requires this, too
-        for dispatcher in self.dispatchers:
-            for cres in dispatcher.overloads.values():
-                sig = nb_types.unliteral(cres.signature)
-                return InlineFunctionType(sig, dispatcher)
-        return self
 
 class TypeofInlineFunction:
     """Automatically inline helpers written on the interactive prompt."""
@@ -119,21 +85,18 @@ class TypeofInlineFunction:
         if not self._is_active or val.__module__ != '__main__':
             return None
 
-        disp = optimize(inline='always')(val)         # registers dispatcher
-        return InlineUndefinedFunctionType(disp)
+      # register dispatcher with Numba
+        disp = optimize(inline='always')(val)
+
+      # place the dispatcher back into the module to ensure next call goes
+      # through the normal lookup, withing entering this fallback
+        setattr(sys.modules[val.__module__], val.__name__, disp)
+
+      # type this function as if it was always a dispatcher (JIT wrapper)
+        return nb_types.Dispatcher(disp)
 
 typeof_inline_function = TypeofInlineFunction()
 nb_ext.typeof_impl.register(type(_dummy))(typeof_inline_function)
-
-@nb_iutils.lower_constant(InlineFunctionType)
-def constant_inline_function(context, builder, ty, pyval):
-    disp = ty.dispatcher
-    assert disp.py_func == pyval
-
-    sfunc = nb_cgu.create_struct_proxy(ty)(context, builder)
-    sfunc.pyaddr = context.add_dynamic_addr(builder, id(disp),
-                                            info=type(disp).__name__)
-    return sfunc._getvalue()
 
 
 # -- pdarray typing ---------------------------------------------------------
