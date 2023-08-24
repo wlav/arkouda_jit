@@ -9,9 +9,13 @@ class ArrayConstructionTests(ArkoudaTest):
 
     def compare(self, forg, *args, **kwds):
         res0 = forg(*args, **kwds)
+        print('result0:', res0)
 
+        print("optimizing:", forg)
         fopt = arkjit.optimize()(forg)
+        print("done!")
         res1 = fopt(*args, **kwds)
+        print("result1:", res1)
 
         assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
 
@@ -40,3 +44,13 @@ class ArrayConstructionTests(ArkoudaTest):
 
         for c in [calc1, calc2, calc3, calc4]:
              self.compare(c)
+
+    def test_fromlist(self):
+        """Test construction of pdarrays from Python lists"""
+
+        def calc1():
+            l = [0, 1, 2, 3, 4]
+            A = ak.array(l)
+            return A
+
+        self.compare(calc1)
