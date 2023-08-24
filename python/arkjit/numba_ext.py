@@ -1,4 +1,4 @@
-""" arkouda extensions for numba
+""" Arkouda extensions for Numba
 """
 
 import arkouda as ak
@@ -14,26 +14,20 @@ import numba
 
 import numba.extending as nb_ext
 import numba.core.cgutils as nb_cgu
-import numba.core.compiler as nb_cmp
-import numba.core.compiler_machinery as nb_cpl
-import numba.core.decorators as nb_dec
 import numba.core.imputils as nb_iutils
 import numba.core.pythonapi as nb_pyapi
 import numba.core.types as nb_types
 import numba.core.typing as nb_typing
 import numba.core.typing.templates as nb_tmpl
-import numba.core.untyped_passes as nb_untyped_pass
-import numba.core.typed_passes as nb_typed_pass
 
 from llvmlite import ir
 
 import sys
 
-
 __all__ = [
-    'optimize',
-    'ArkoudaCompiler'
-    ]
+    'PDArrayType',
+    'PDArrayBinOpSignature',
+]
 
 
 # -- helpers ----------------------------------------------------------------
@@ -58,45 +52,6 @@ def register_type(pytype, identifier):
         return identifier
 
     return identifier
-
-
-# -- general function inliner -----------------------------------------------
-def _dummy():
-    pass
-
-class InlineUndefinedFunctionType(nb_types.UndefinedFunctionType):
-    def __init__(self, dispatcher):
-        pysig = inspect.signature(dispatcher.py_func)
-        super(InlineUndefinedFunctionType, self).__init__(len(pysig.parameters), [dispatcher])
-
-class TypeofInlineFunction:
-    """Automatically inline helpers written on the interactive prompt."""
-
-    def __init__(self):
-        self._is_active = False
-
-    def __enter__(self):
-        self._is_active = True
-
-    def __exit__(self, tp, val, trace):
-        self._is_active = False
-
-    def __call__(self, val, c):
-        if not self._is_active or val.__module__ != '__main__':
-            return None
-
-      # register dispatcher with Numba
-        disp = optimize(inline='always')(val)
-
-      # place the dispatcher back into the module to ensure next call goes
-      # through the normal lookup, withing entering this fallback
-        setattr(sys.modules[val.__module__], val.__name__, disp)
-
-      # type this function as if it was always a dispatcher (JIT wrapper)
-        return nb_types.Dispatcher(disp)
-
-typeof_inline_function = TypeofInlineFunction()
-nb_ext.typeof_impl.register(type(_dummy))(typeof_inline_function)
 
 
 # -- pdarray typing ---------------------------------------------------------
@@ -355,87 +310,3 @@ for _fn in akcreate.__all__:
     if callable(_f):
         create_creator_overload(_f)
 
-
-# -- pdarray optimization passes --------------------------------------------
-
-@nb_cpl.register_pass(mutates_CFG=True, analysis_only=False)
-class ArkoudaFunctionPass(nb_cpl.FunctionPass):
-    _name = "arkouda_function_pass"
-
-    def __init__(self):
-        super().__init__()
-
-    def run_pass(self, state):
-        print("Arkouda function pass")
-        return False
-
-    def __str__(self):
-        return "Arkouda function pass"
-
-@nb_cpl.register_pass(mutates_CFG=True, analysis_only=False)
-class ArkoudaCSE(nb_cpl.LoweringPass):
-    """
-    Common Subexpression Elmination (CSE) for Arkouda operations
-    """
-
-    _name = "arkouda_cse"
-
-    def __init__(self):
-        super().__init__()
-
-    def run_pass(self, state):
-        print("Arkouda common subexpression elimination pass")
-
-        for block in state.func_ir.blocks.values():
-            pda_expr = dict()
-            for stmt in block.body:
-                try:
-                    if isinstance(state.calltypes[stmt.value], PDArrayBinOpSignature):
-                        key = (stmt.value.op, stmt.value.lhs, stmt.value.rhs)
-                        seen = pda_expr.get(key, None)
-                        if seen is not None:
-                            stmt.value = seen.target
-                        else:
-                            pda_expr[key] = stmt
-                except KeyError:   # not part of the original Python
-                    pass
-
-        return True
-
-    def __str__(self):
-        return "common subexpression elimination for PDArrays"
-
-#
-# compiler which adds custom Arkouda passes
-#
-class ArkoudaCompiler(nb_cmp.CompilerBase):
-    def compile_extra(self, func):
-        with typeof_inline_function:
-            result = super(ArkoudaCompiler, self).compile_extra(func)
-        return result
-
-    def define_pipelines(self):
-      # start with the complete Numba pipeline
-        pm = nb_cmp.DefaultPassBuilder.define_nopython_pipeline(self.state)
-
-      # function pass example
-        pm.add_pass_after(ArkoudaFunctionPass, nb_untyped_pass.IRProcessing)
-
-      # common subexpression elimination, first pass after typing is done
-        pm.add_pass_after(ArkoudaCSE, nb_typed_pass.AnnotateTypes)
-
-        pm.finalize()
-        return [pm]
-
-#
-# decorator selecting the ArkoudaCompiler
-#
-def optimize(*args, **kwds):
-  # Numba compiler with Arkouda-specific passes and run in
-  # object mode by default (to allow simple re-use of Arkouda's
-  # pdarray class as-is to generate messages)
-    kwds['pipeline_class'] = ArkoudaCompiler
-    kwds['nopython' ] = True
-
-  # enable jitting for this function (actual run deferred to first call)
-    return nb_dec.jit(*args, **kwds)
