@@ -9,13 +9,9 @@ class ArrayConstructionTests(ArkoudaTest):
 
     def compare(self, forg, *args, **kwds):
         res0 = forg(*args, **kwds)
-        print('result0:', res0)
 
-        print("optimizing:", forg)
         fopt = arkjit.optimize()(forg)
-        print("done!")
         res1 = fopt(*args, **kwds)
-        print("result1:", res1)
 
         assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
 
