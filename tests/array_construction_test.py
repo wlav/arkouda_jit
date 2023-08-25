@@ -1,3 +1,5 @@
+import numpy as np
+
 from base_test import ArkoudaTest
 from context import arkouda as ak
 
@@ -41,12 +43,22 @@ class ArrayConstructionTests(ArkoudaTest):
         for c in [calc1, calc2, calc3, calc4]:
              self.compare(c)
 
-    def test_fromlist(self):
+    def test_from_list(self):
         """Test construction of pdarrays from Python lists"""
 
         def calc1():
             l = [0, 1, 2, 3, 4]
             A = ak.array(l)
+            return A
+
+        self.compare(calc1)
+
+    def test_from_numpy(self):
+        """Test construction of pdarrays from numpy arrays"""
+
+        def calc1():
+            a = np.array([0, 1, 2, 3, 4])
+            A = ak.array(a)
             return A
 
         self.compare(calc1)

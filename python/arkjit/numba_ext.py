@@ -242,9 +242,11 @@ def create_creator_lowering(func):
           # no keywords case
             rl_args = args
 
+        env_manager = context.get_env_manager(builder)
+
         pyargs = pyapi.tuple_new(len(rl_args))
         for iarg, arg in enumerate(rl_args):
-            pyargb = pyapi.from_native_value(sig.args[iarg], arg, None)
+            pyargb = pyapi.from_native_value(sig.args[iarg], arg, env_manager)
             pyapi.tuple_setitem(pyargs, iarg, pyargb)
 
         pyf = pyapi.object_getattr_string(ak_mod, func.__name__)
