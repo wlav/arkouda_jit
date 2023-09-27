@@ -136,6 +136,8 @@ def pda_signature(kind, return_type: nb_types.Type, fargs: py_typing.Tuple,
 #
 def create_creator_overload(func: py_typing.Callable) -> None:
     class PDArrayCreate(nb_tmpl.AbstractTemplate):
+        _lowered  = set()
+
         @property
         def key(self) -> py_typing.Callable:
             return func
@@ -147,9 +149,11 @@ def create_creator_overload(func: py_typing.Callable) -> None:
 
           # register a creator lowering implementation for the given argument
           # types (which are assumed to be correct)
-            decorate = nb_iutils.lower_builtin(
-                func, *tuple(type_remap(x) for x in args))
-            decorate(create_creator_lowering(func))
+            lower_args = tuple(type_remap(x) for x in args)
+            if not lower_args in self._lowered:
+                decorate = nb_iutils.lower_builtin(func, *lower_args)
+                decorate(create_creator_lowering(func))
+                self._lowered.add(lower_args)
 
             return pda_signature(
                 'constructor', pdarray_type, args, kwds, func=func, recvr=None)
@@ -246,8 +250,10 @@ def create_creator_lowering(func):
 
         pyargs = pyapi.tuple_new(len(rl_args))
         for iarg, arg in enumerate(rl_args):
+            # from_native_value steals a reference from the original `arg`
+            context.nrt.incref(builder, sig.args[iarg], arg)
             pyargb = pyapi.from_native_value(sig.args[iarg], arg, env_manager)
-            pyapi.tuple_setitem(pyargs, iarg, pyargb)
+            pyapi.tuple_setitem(pyargs, iarg, pyargb)      # steals reference
 
         pyf = pyapi.object_getattr_string(ak_mod, func.__name__)
         pda = pyapi.call(pyf, pyargs, pykwds)
