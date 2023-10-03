@@ -3,11 +3,11 @@
 
 import numba.core.compiler_machinery as nb_cpl
 
-from .numba_ext import (PDArrayBinOpSignature,)
+from .numba_ext import PDArrayBinOpSignature
 
 __all__ = [
-    'ArkoudaFunctionPass',
-    'ArkoudaCSE',
+    "ArkoudaFunctionPass",
+    "ArkoudaCSE",
 ]
 
 
@@ -53,11 +53,10 @@ class ArkoudaCSE(nb_cpl.LoweringPass):
                             stmt.value = seen.target
                         else:
                             pda_expr[key] = stmt
-                except KeyError:   # not part of the original Python
+                except KeyError:  # not part of the original Python
                     pass
 
         return True
 
     def __str__(self):
         return "common subexpression elimination for PDArrays"
-
