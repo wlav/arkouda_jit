@@ -116,7 +116,6 @@ def pda_signature(
     if fkwds:
         if func is not None:
             pysig = inspect.signature(func)
-            assert "kwargs" in pysig.parameters, "function does not support keywords"
             if "args" in pysig.parameters:
                 # we have the actual types, so unroll them instead
                 parms = [
