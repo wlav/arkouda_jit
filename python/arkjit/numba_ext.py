@@ -7,6 +7,7 @@ import typing as py_typing
 
 import arkouda as ak
 import arkouda.pdarraycreation as akcreate
+import numba
 import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
 import numba.core.pythonapi as nb_pyapi
@@ -149,14 +150,28 @@ def create_creator_overload(func: py_typing.Callable) -> None:
 
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
             if kwds:
+                # place keywords in args, use placeholders where needed
                 pysig = inspect.signature(func)
-                if 'kwargs' in pysig.parameters or \
-                        tuple(filter(lambda x: isinstance(x, OpaquePyType), kwds.values())):
+
+                if 'kwargs' in pysig.parameters:
                     # keywords are passed, unrolled, through additional PyObject* arguments
                     args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
                 else:
                     # keyword types are mapped to the actual positional parameters
-                    args = tuple(kwds[name] for name in list(pysig.parameters.keys())[:len(kwds)])
+                    arg_names = list(pysig.parameters.keys())[len(args):]
+
+                    _args = list(args)
+                    _kwds = dict(kwds)
+                    for name in arg_names:
+                        try:
+                            _args.append(_kwds.pop(name))
+                        except KeyError:
+                            _args.append(numba.typeof(pysig.parameters[name].default))
+
+                        if not _kwds:
+                            break
+
+                    args = tuple(_args)
 
             # register a creator lowering implementation for the given argument
             # types (which are assumed to be correct)

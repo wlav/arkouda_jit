@@ -131,3 +131,16 @@ class ArrayConstructionTests(ArkoudaTest):
 
         assert self.verify(locals())
 
+    def test_random(self):
+        """JITing of arkouda.random"""
+
+        def calc1():
+            return ak.randint(1, 5, 10, seed=2)
+
+        def calc2():
+            return ak.randint(1, 5, 3, dtype=ak.float64, seed=2)
+
+        def calc3():
+            return ak.randint(1, 5, 10, dtype=ak.bool, seed=2)
+
+        assert self.verify(locals())
