@@ -123,11 +123,11 @@ class ArrayConstructionTests(ArkoudaTest):
         def calc1():
             return ak.linspace(0, 1, 5)
 
-        #def calc2():
-        #    return ak.linspace(start=1, stop=0, length=5)
+        def calc2():
+            return ak.linspace(start=1, stop=0, length=5)
 
-        #def calc3():
-        #    return ak.linspace(start=-5, stop=0, length=5)
+        def calc3():
+            return ak.linspace(start=-5, stop=0, length=5)
 
         assert self.verify(locals())
 

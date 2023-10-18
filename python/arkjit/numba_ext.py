@@ -148,9 +148,15 @@ def create_creator_overload(func: py_typing.Callable) -> None:
             return func
 
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
-            # keywords are passed, unrolled, through additional PyObject* arguments
             if kwds:
-                args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
+                pysig = inspect.signature(func)
+                if 'kwargs' in pysig.parameters or \
+                        tuple(filter(lambda x: isinstance(x, OpaquePyType), kwds.values())):
+                    # keywords are passed, unrolled, through additional PyObject* arguments
+                    args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
+                else:
+                    # keyword types are mapped to the actual positional parameters
+                    args = tuple(kwds[name] for name in list(pysig.parameters.keys())[:len(kwds)])
 
             # register a creator lowering implementation for the given argument
             # types (which are assumed to be correct)
