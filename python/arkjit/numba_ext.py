@@ -7,6 +7,7 @@ import typing as py_typing
 
 import arkouda as ak
 import arkouda.pdarraycreation as akcreate
+import arkouda.pdarraysetops as aksetops
 import numba
 import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
@@ -55,7 +56,6 @@ def register_type(pytype, identifier):
 # fake type to shuttle arbitrary instances
 #
 
-
 class OpaquePyType(nb_types.Type):
     known_types = set()
 
@@ -69,7 +69,6 @@ opaque_py_type = OpaquePyType()
 #
 # main arkouda types
 #
-
 
 class PDArrayType(nb_types.Type):
     def __init__(self) -> None:
@@ -86,9 +85,54 @@ register_type(np.dtype, opaque_py_type)
 
 
 #
-# pdarray signatures
+# overload construction
 #
 
+class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
+    _lowered = set()
+
+    def typeof_args(self, func: py_typing.Callable, args: py_typing.Tuple, kwds: py_typing.Dict) -> py_typing.Tuple:
+        """Construct full list of argument types from typed arguments and keywords"""
+
+        if kwds:
+            # place keywords in args, use placeholders where needed
+            pysig = inspect.signature(func)
+
+            if 'kwargs' in pysig.parameters:
+                # keywords are passed, unrolled, through additional PyObject* arguments
+                args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
+            else:
+                # keyword types are mapped to the actual positional parameters
+                arg_names = list(pysig.parameters.keys())[len(args):]
+
+                _args = list(args)
+                _kwds = dict(kwds)
+                for name in arg_names:
+                    try:
+                        _args.append(_kwds.pop(name))
+                    except KeyError:
+                        _args.append(numba.typeof(pysig.parameters[name].default))
+
+                    if not _kwds:
+                        break
+
+                args = tuple(_args)
+
+        return args
+
+    def register_lowering(self, func: py_typing.Callable, args: py_typing.Tuple, lowering: py_typing.Callable) -> None:
+        # register a creator lowering implementation for the given argument
+        # types (which are assumed to be correct)
+        lower_args = tuple(type_remap(x) for x in args)
+        if lower_args not in self._lowered:
+            decorate = nb_iutils.lower_builtin(func, *lower_args)
+            decorate(lowering(func))
+            self._lowered.add(lower_args)
+
+
+#
+# pdarray signatures
+#
 
 class PDArraySignature(nb_tmpl.Signature):
     pass
@@ -140,8 +184,29 @@ def pda_signature(
 #
 # pdarray creation
 #
+
 def create_creator_overload(func: py_typing.Callable) -> None:
-    class PDArrayCreate(nb_tmpl.AbstractTemplate):
+    class PDArrayCreate(PDArrayOverloadTemplate):
+        @property
+        def key(self) -> py_typing.Callable:
+            return func
+
+        def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
+            typed_args = self.typeof_args(func, args, kwds)
+            self.register_lowering(func, args, create_generic_lowering)
+
+            return pda_signature("constructor", pdarray_type, typed_args, kwds, func=func, recvr=None)
+
+    decorate = nb_tmpl.infer_global(func)
+    decorate(PDArrayCreate)
+
+
+#
+# pdarray annotated methods overloads
+#
+
+def create_annotated_overload(func: py_typing.Callable) -> None:
+    class PDArrayFunction(PDArrayOverloadTemplate):
         _lowered = set()
 
         @property
@@ -149,47 +214,28 @@ def create_creator_overload(func: py_typing.Callable) -> None:
             return func
 
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
-            if kwds:
-                # place keywords in args, use placeholders where needed
-                pysig = inspect.signature(func)
+            typed_args = self.typeof_args(func, args, kwds)
+            self.register_lowering(func, args, create_generic_lowering)
 
-                if 'kwargs' in pysig.parameters:
-                    # keywords are passed, unrolled, through additional PyObject* arguments
-                    args = args + tuple(KeywordPlaceholder(key) for key in kwds.keys())
-                else:
-                    # keyword types are mapped to the actual positional parameters
-                    arg_names = list(pysig.parameters.keys())[len(args):]
+          # derive return type from arguments, given several common signatures
+            pysig = inspect.signature(func)
+            if len(typed_args) == 1 and isinstance(typed_args[0], nb_types.containers.List):
+                # operations on a list of arrays; returns the same type of array
+                return_type = args[0].key[0]
+            else:
+                # dumb default; TODO: should warn?
+                return_type = pdarray_type
 
-                    _args = list(args)
-                    _kwds = dict(kwds)
-                    for name in arg_names:
-                        try:
-                            _args.append(_kwds.pop(name))
-                        except KeyError:
-                            _args.append(numba.typeof(pysig.parameters[name].default))
-
-                        if not _kwds:
-                            break
-
-                    args = tuple(_args)
-
-            # register a creator lowering implementation for the given argument
-            # types (which are assumed to be correct)
-            lower_args = tuple(type_remap(x) for x in args)
-            if lower_args not in self._lowered:
-                decorate = nb_iutils.lower_builtin(func, *lower_args)
-                decorate(create_creator_lowering(func))
-                self._lowered.add(lower_args)
-
-            return pda_signature("constructor", pdarray_type, args, kwds, func=func, recvr=None)
+            return pda_signature("function", return_type, typed_args, kwds, func=func, recvr=None)
 
     decorate = nb_tmpl.infer_global(func)
-    decorate(PDArrayCreate)
+    decorate(PDArrayFunction)
 
 
 #
 # mathematical operations on pdarray
 #
+
 class PDArrayBinOp(nb_tmpl.ConcreteTemplate):
     cases = [pda_signature("binop", pdarray_type, (pdarray_type, pdarray_type))]
 
@@ -257,7 +303,8 @@ def opaque_as_placeholder(context, builder, fromty, toty, val):
 #
 # pdarray creation
 #
-def create_creator_lowering(func):
+
+def create_generic_lowering(func):
     def imp_creator(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
         gil_state = pyapi.gil_ensure()
@@ -299,7 +346,7 @@ def create_creator_lowering(func):
 
         pyapi.gil_release(gil_state)
 
-        # return result as a void ptr
+        # return result as a PyObject*
         result = nb_cgu.alloca_once(builder, pyapi.pyobj)
         builder.store(pda, result)
         return builder.load(result)
@@ -310,6 +357,7 @@ def create_creator_lowering(func):
 #
 # mathematical operations on pdarray
 #
+
 def create_lowering_op(op):
     def imp_op(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
@@ -349,3 +397,14 @@ for _fn in akcreate.__all__:
     _f = getattr(akcreate, _fn)
     if callable(_f):
         create_creator_overload(_f)
+
+
+#
+# set operations
+#
+
+for _fn in aksetops.__all__:
+    _f = getattr(aksetops, _fn)
+    if callable(_f):
+        create_annotated_overload(_f)
+
