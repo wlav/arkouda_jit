@@ -1,30 +1,11 @@
 import numpy as np
 
-from base_test import ArkoudaTest
+from common import ArkoudaJITTest
 from context import arkouda as ak
 
-import arkjit
-import inspect
 
-
-class ArrayConstructionTests(ArkoudaTest):
+class ArrayConstructionTests(ArkoudaJITTest):
     """Test JITed pdarray constructors"""
-
-    def compare(self, forg, *args, **kwds):
-        res0 = forg(*args, **kwds)
-
-        fopt = arkjit.optimize()(forg)
-        res1 = fopt(*args, **kwds)
-
-        assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
-
-    def verify(self, stack):
-        if isinstance(stack, dict):
-            stack = stack.values()
-
-        for count, c in enumerate((f for f in stack if inspect.isfunction(f)), 1):
-            self.compare(c)
-        return count
 
     def test_from_list(self):
         """JITing of pdarray construction from Python lists"""
@@ -144,3 +125,4 @@ class ArrayConstructionTests(ArkoudaTest):
             return ak.randint(1, 5, 10, dtype=ak.bool, seed=2)
 
         assert self.verify(locals())
+
