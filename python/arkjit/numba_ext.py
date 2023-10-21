@@ -29,6 +29,8 @@ ir_byte = ir.IntType(8)
 ir_voidptr = ir.PointerType(ir_byte)  # by convention
 ir_byteptr = ir_voidptr  # for clarity
 
+ak_types = [nb_types.int64, nb_types.float64]
+
 
 def type_remap(t: nb_types.Type) -> type:
     if isinstance(t, nb_types.Integer):
@@ -233,30 +235,38 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
 
 
 #
-# mathematical operations on pdarray
+# numeric/arithmetic operations on pdarray
 #
 
 class PDArrayBinOp(nb_tmpl.ConcreteTemplate):
-    cases = [pda_signature("binop", pdarray_type, (pdarray_type, pdarray_type))]
+    cases = [pda_signature("binop", pdarray_type, (pdarray_type, pdarray_type))] + \
+        [pda_signature("binop", pdarray_type, (pdarray_type, x)) for x in ak_types] + \
+        [pda_signature("binop", pdarray_type, (x, pdarray_type)) for x in ak_types]
+
+def _binop_type(op):
+    kls = type('PDArrayBinOp'+op.__name__.upper(), (PDArrayBinOp,), {})
+    nb_tmpl.infer_global(op)(kls)
+    return kls
+
+PDArrayBinOpMUL         = _binop_type(operator.mul)
+PDArrayBinOpIMUL        = _binop_type(operator.imul)
+PDArrayBinOpADD         = _binop_type(operator.add)
+PDArrayBinOpIADD        = _binop_type(operator.iadd)
+PDArrayBinOpSUB         = _binop_type(operator.sub)
+PDArrayBinOpISUB        = _binop_type(operator.isub)
+PDArrayBinOpTRUEDIV     = _binop_type(operator.truediv)
+PDArrayBinOpITRUEDIV    = _binop_type(operator.itruediv)
 
 
-@nb_tmpl.infer_global(operator.mul)
-class PDArrayBinOpMul(PDArrayBinOp):
+class PDArrayCmp(nb_tmpl.ConcreteTemplate):
+    cases = [pda_signature("cmp", pdarray_type, (pdarray_type, pdarray_type))]
+
+@nb_tmpl.infer_global(operator.eq)
+class PDArrayEQ(PDArrayCmp):
     pass
 
-
-@nb_tmpl.infer_global(operator.add)
-class PDArrayBinOpAdd(PDArrayBinOp):
-    pass
-
-
-@nb_tmpl.infer_global(operator.sub)
-class PDArrayBinOpSub(PDArrayBinOp):
-    pass
-
-
-@nb_tmpl.infer_global(operator.truediv)
-class PDArrayBinOpTrueDiv(PDArrayBinOp):
+@nb_tmpl.infer_global(operator.ne)
+class PDArrayNE(PDArrayCmp):
     pass
 
 
@@ -355,7 +365,7 @@ def create_generic_lowering(func):
 
 
 #
-# mathematical operations on pdarray
+# numeric/arithmetic operations on pdarray
 #
 
 def create_lowering_op(op):
@@ -365,8 +375,16 @@ def create_lowering_op(op):
 
         # box the arguments
         c = nb_pyapi._BoxContext(context, builder, pyapi, None)
-        pyself = box_pyobject(sig.args[0], args[0], c)
-        pyargs = (box_pyobject(sig.args[1], args[1], c),)
+        self_idx = 0; other_idx = 1
+        if not isinstance(sig.args[0], PDArrayType):
+            self_idx = 1; other_idx = 0
+
+        pyself = box_pyobject(sig.args[self_idx], args[self_idx], c)
+        if isinstance(sig.args[other_idx], PDArrayType):
+            pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], c),)
+        else:
+            env_manager = context.get_env_manager(builder)
+            pyargs = (pyapi.from_native_value(sig.args[other_idx], args[other_idx], env_manager),)
 
         # call the Python-side method
         pda = pyapi.call_method(pyself, "__%s__" % op.__name__, pyargs)
@@ -382,9 +400,17 @@ def create_lowering_op(op):
     return imp_op
 
 
-for op in (operator.mul, operator.add, operator.sub, operator.truediv):
-    decorate = nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)
-    decorate(create_lowering_op(op))
+for op in (operator.mul, operator.imul,
+           operator.add, operator.iadd,
+           operator.sub, operator.isub,
+           operator.truediv, operator.itruediv):
+    nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
+    for x in ak_types:
+        nb_iutils.lower_builtin(op, pdarray_type, x)(create_lowering_op(op))
+        nb_iutils.lower_builtin(op, x, pdarray_type)(create_lowering_op(op))
+
+for op in (operator.eq, operator.ne):
+    nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
 
 
 # -- automatic overloading of Arkouda APIs ----------------------------------
