@@ -1,6 +1,7 @@
 """ Arkouda extensions for Numba
 """
 
+import collections
 import inspect
 import operator
 import typing as py_typing
@@ -8,6 +9,7 @@ import typing as py_typing
 import arkouda as ak
 import arkouda.pdarraycreation as akcreate
 import arkouda.pdarraysetops as aksetops
+import arkouda.numeric as aknum
 import numba
 import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
@@ -57,13 +59,11 @@ def register_type(pytype, identifier):
 #
 # fake type to shuttle arbitrary instances
 #
-
 class OpaquePyType(nb_types.Type):
     known_types = set()
 
     def __init__(self) -> None:
         super(OpaquePyType, self).__init__(name="OpaquePyObject")
-
 
 opaque_py_type = OpaquePyType()
 
@@ -71,11 +71,9 @@ opaque_py_type = OpaquePyType()
 #
 # main arkouda types
 #
-
 class PDArrayType(nb_types.Type):
     def __init__(self) -> None:
         super(PDArrayType, self).__init__(name="PDArray")
-
 
 pdarray_type = register_type(ak.pdarrayclass.pdarray, PDArrayType())
 
@@ -89,9 +87,8 @@ register_type(np.dtype, opaque_py_type)
 #
 # overload construction
 #
-
 class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
-    _lowered = set()
+    _lowered = collections.defaultdict(set)
 
     def typeof_args(self, func: py_typing.Callable, args: py_typing.Tuple, kwds: py_typing.Dict) -> py_typing.Tuple:
         """Construct full list of argument types from typed arguments and keywords"""
@@ -126,16 +123,15 @@ class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
         # register a creator lowering implementation for the given argument
         # types (which are assumed to be correct)
         lower_args = tuple(type_remap(x) for x in args)
-        if lower_args not in self._lowered:
+        if lower_args not in self._lowered[func]:
             decorate = nb_iutils.lower_builtin(func, *lower_args)
             decorate(lowering(func))
-            self._lowered.add(lower_args)
+            self._lowered[func].add(lower_args)
 
 
 #
 # pdarray signatures
 #
-
 class PDArraySignature(nb_tmpl.Signature):
     pass
 
@@ -186,7 +182,6 @@ def pda_signature(
 #
 # pdarray creation
 #
-
 def create_creator_overload(func: py_typing.Callable) -> None:
     class PDArrayCreate(PDArrayOverloadTemplate):
         @property
@@ -195,7 +190,7 @@ def create_creator_overload(func: py_typing.Callable) -> None:
 
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
             typed_args = self.typeof_args(func, args, kwds)
-            self.register_lowering(func, args, create_generic_lowering)
+            self.register_lowering(func, typed_args, create_generic_lowering)
 
             return pda_signature("constructor", pdarray_type, typed_args, kwds, func=func, recvr=None)
 
@@ -206,10 +201,9 @@ def create_creator_overload(func: py_typing.Callable) -> None:
 #
 # pdarray annotated methods overloads
 #
-
 def create_annotated_overload(func: py_typing.Callable) -> None:
     class PDArrayFunction(PDArrayOverloadTemplate):
-        _lowered = set()
+        _lowered = collections.defaultdict(set)
 
         @property
         def key(self) -> py_typing.Callable:
@@ -237,7 +231,6 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
 #
 # numeric/arithmetic operations on pdarray
 #
-
 class PDArrayBinOp(nb_tmpl.ConcreteTemplate):
     cases = [pda_signature("binop", pdarray_type, (pdarray_type, pdarray_type))] + \
         [pda_signature("binop", pdarray_type, (pdarray_type, x)) for x in ak_types] + \
@@ -313,7 +306,6 @@ def opaque_as_placeholder(context, builder, fromty, toty, val):
 #
 # pdarray creation
 #
-
 def create_generic_lowering(func):
     def imp_creator(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
@@ -367,7 +359,6 @@ def create_generic_lowering(func):
 #
 # numeric/arithmetic operations on pdarray
 #
-
 def create_lowering_op(op):
     def imp_op(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
@@ -418,7 +409,6 @@ for op in (operator.eq, operator.ne):
 #
 # pdarray creation
 #
-
 for _fn in akcreate.__all__:
     _f = getattr(akcreate, _fn)
     if callable(_f):
@@ -428,9 +418,17 @@ for _fn in akcreate.__all__:
 #
 # set operations
 #
-
 for _fn in aksetops.__all__:
     _f = getattr(aksetops, _fn)
+    if callable(_f):
+        create_annotated_overload(_f)
+
+
+#
+# element-wise operations
+#
+for _fn in aknum.__all__:
+    _f = getattr(aknum, _fn)
     if callable(_f):
         create_annotated_overload(_f)
 
