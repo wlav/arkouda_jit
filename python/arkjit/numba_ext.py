@@ -7,9 +7,10 @@ import operator
 import typing as py_typing
 
 import arkouda as ak
+import arkouda.numeric as aknum
+import arkouda.pdarrayclass as akclass
 import arkouda.pdarraycreation as akcreate
 import arkouda.pdarraysetops as aksetops
-import arkouda.numeric as aknum
 import numba
 import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
@@ -213,14 +214,24 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
             typed_args = self.typeof_args(func, args, kwds)
             self.register_lowering(func, args, create_generic_lowering)
 
-          # derive return type from arguments, given several common signatures
+          # derive return type from annotation or arguments; intent is
+          # only to identify pdarray's for optimizing passes: in all
+          # cases, the generated lowering expects a generic PyObject
             pysig = inspect.signature(func)
-            if len(typed_args) == 1 and isinstance(typed_args[0], nb_types.containers.List):
-                # operations on a list of arrays; returns the same type of array
-                return_type = args[0].key[0]
-            else:
-                # dumb default; TODO: should warn?
+            return_type = None
+            if pysig.return_annotation in ('pdarray', ak.pdarray):
                 return_type = pdarray_type
+            else:
+                # some heuristics
+                if len(typed_args) == 1 and isinstance(typed_args[0], nb_types.containers.List):
+                    # operations on a list of arrays; returns the same type of array
+                    # TODO: a common alternative is to return ak.Strings when given
+                    # ak.pdarray's as input; would need to specialize on the dtype
+                    # of the array to capture those
+                    return_type = args[0].key[0]
+
+            if return_type is None:
+                return_type = opaque_py_type
 
             return pda_signature("function", return_type, typed_args, kwds, func=func, recvr=None)
 
@@ -416,19 +427,11 @@ for _fn in akcreate.__all__:
 
 
 #
-# set operations
+# operations
 #
-for _fn in aksetops.__all__:
-    _f = getattr(aksetops, _fn)
-    if callable(_f):
-        create_annotated_overload(_f)
-
-
-#
-# element-wise operations
-#
-for _fn in aknum.__all__:
-    _f = getattr(aknum, _fn)
-    if callable(_f):
-        create_annotated_overload(_f)
+for mod in [akclass, aknum, aksetops]:
+    for _fn in mod.__all__:
+        _f = getattr(mod, _fn)
+        if callable(_f):
+            create_annotated_overload(_f)
 
