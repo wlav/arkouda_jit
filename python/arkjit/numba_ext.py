@@ -261,17 +261,12 @@ PDArrayBinOpISUB        = _binop_type(operator.isub)
 PDArrayBinOpTRUEDIV     = _binop_type(operator.truediv)
 PDArrayBinOpITRUEDIV    = _binop_type(operator.itruediv)
 
-
-class PDArrayCmp(nb_tmpl.ConcreteTemplate):
-    cases = [pda_signature("cmp", pdarray_type, (pdarray_type, pdarray_type))]
-
-@nb_tmpl.infer_global(operator.eq)
-class PDArrayEQ(PDArrayCmp):
-    pass
-
-@nb_tmpl.infer_global(operator.ne)
-class PDArrayNE(PDArrayCmp):
-    pass
+PDArrayBinOpLT          = _binop_type(operator.eq)
+PDArrayBinOpLE          = _binop_type(operator.ne)
+PDArrayBinOpLT          = _binop_type(operator.lt)
+PDArrayBinOpLE          = _binop_type(operator.le)
+PDArrayBinOpGT          = _binop_type(operator.gt)
+PDArrayBinOpGE          = _binop_type(operator.ge)
 
 
 # -- arkouda types lowering -------------------------------------------------
@@ -405,7 +400,10 @@ def create_lowering_op(op):
 for op in (operator.mul, operator.imul,
            operator.add, operator.iadd,
            operator.sub, operator.isub,
-           operator.truediv, operator.itruediv):
+           operator.truediv, operator.itruediv,
+           operator.eq,  operator.ne,
+           operator.lt,  operator.le,
+           operator.gt,  operator.ge):
     nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
     for x in ak_types:
         nb_iutils.lower_builtin(op, pdarray_type, x)(create_lowering_op(op))
