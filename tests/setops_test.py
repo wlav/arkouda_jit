@@ -14,9 +14,11 @@ class SetOperationsTests(ArkoudaJITTest):
             return ak.concatenate([ak.array([1, 2, 3]), ak.array([4, 5, 6])])
 
         def calc2():
-            return ak.concatenate([ak.array([True,False,True]), ak.array([False,True,True])])
+            return ak.concatenate(
+                [ak.array([True, False, True]), ak.array([False, True, True])])
 
         def calc3():
-            return ak.concatenate([ak.array(['one','two']), ak.array(['three','four','five'])])
+            return ak.concatenate(
+                [ak.array(['one', 'two']), ak.array(['three', 'four', 'five'])])
 
         assert self.verify(locals())

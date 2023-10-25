@@ -1,5 +1,6 @@
 from base_test import ArkoudaTest
 
+import arkouda as ak
 import arkjit
 import inspect
 
@@ -13,7 +14,10 @@ class ArkoudaJITTest(ArkoudaTest):
         fopt = arkjit.optimize()(forg)
         res1 = fopt(*args, **kwds)
 
-        assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
+        if isinstance(res0, (ak.pdarray, ak.Strings)):
+            assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
+        else:
+            assert res0 == res1
 
     def verify(self, stack):
         if isinstance(stack, dict):
