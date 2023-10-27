@@ -113,9 +113,6 @@ class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
                     except KeyError:
                         _args.append(numba.typeof(pysig.parameters[name].default))
 
-                    if not _kwds:
-                        break
-
                 args = tuple(_args)
 
         return args
