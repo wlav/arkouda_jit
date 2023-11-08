@@ -272,9 +272,11 @@ class PDArrayGetItem(nb_tmpl.AbstractTemplate):
     def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
         assert not kwds
         arr_type, idx_type = args
-        if isinstance(arr_type, PDArrayType) and \
-                isinstance(idx_type, (PDArrayType, nb_types.Integer, nb_types.SliceType)):
-            return pda_signature("getitem", opaque_py_type, (arr_type, idx_type))
+        if isinstance(arr_type, PDArrayType):
+            if isinstance(idx_type, nb_types.Integer):
+                return pda_signature("getitem", opaque_py_type, (arr_type, idx_type))
+            elif isinstance(idx_type, (PDArrayType, nb_types.SliceType)):
+                return pda_signature("getitem", pdarray_type, (arr_type, idx_type))
 
 @nb_tmpl.infer_global(operator.setitem)
 class PDArraySetItem(nb_tmpl.AbstractTemplate):

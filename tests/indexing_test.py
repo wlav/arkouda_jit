@@ -80,12 +80,10 @@ class IndexingTests(ArkoudaJITTest):
             A[inds] = 42
             return A
 
-        """
         def calc2():
             B = ak.arange(0, 10, 1)
             lim = 10//2
             B[B < lim] = B[:lim] * -1
             return B
-        """
 
         assert self.verify(locals())
