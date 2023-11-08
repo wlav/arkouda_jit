@@ -16,6 +16,7 @@ import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
 import numba.core.pythonapi as nb_pyapi
 import numba.core.types as nb_types
+import numba.core.typing.builtins as nb_blt
 import numba.core.typing.templates as nb_tmpl
 import numba.extending as nb_ext
 import numpy as np
@@ -31,6 +32,7 @@ __all__ = [
 ir_byte = ir.IntType(8)
 ir_voidptr = ir.PointerType(ir_byte)  # by convention
 ir_byteptr = ir_voidptr  # for clarity
+ir_errcode = ir.IntType(32)
 
 ak_types = [nb_types.int64, nb_types.float64]
 
@@ -265,6 +267,24 @@ PDArrayBinOpLE          = _binop_type(operator.le)
 PDArrayBinOpGT          = _binop_type(operator.gt)
 PDArrayBinOpGE          = _binop_type(operator.ge)
 
+@nb_tmpl.infer_global(operator.getitem)
+class PDArrayGetItem(nb_tmpl.AbstractTemplate):
+    def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
+        assert not kwds
+        arr_type, idx_type = args
+        if isinstance(arr_type, PDArrayType) and \
+                isinstance(idx_type, (PDArrayType, nb_types.Integer, nb_types.SliceType)):
+            return pda_signature("getitem", opaque_py_type, (arr_type, idx_type))
+
+@nb_tmpl.infer_global(operator.setitem)
+class PDArraySetItem(nb_tmpl.AbstractTemplate):
+    def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
+        assert not kwds
+        arr_type, idx_type, val_type = args
+        if isinstance(arr_type, PDArrayType) and \
+                isinstance(idx_type, (PDArrayType, nb_types.Integer, nb_types.SliceType)):
+            return pda_signature("setitem", nb_types.none, (arr_type, idx_type, val_type))
+
 
 # -- arkouda types lowering -------------------------------------------------
 class CapsuleModel(nb_ext.models.PrimitiveModel):
@@ -306,17 +326,35 @@ def opaque_as_placeholder(context, builder, fromty, toty, val):
     return builder.load(ptr)
 
 
+# there is no boxing method for slices in Numba, so add one
+@nb_ext.box(nb_types.SliceType)
+def box_slice(typ, val, c):
+    ret_ptr = nb_cgu.alloca_once(c.builder, c.pyapi.pyobj)
+    sli = nb_cgu.create_struct_proxy(typ)(c.context, c.builder, value=val)
+
+    class_obj = c.pyapi.unserialize(c.pyapi.serialize_object(slice))
+    pyargs = tuple(c.box(nb_types.int64, d) for d in (sli.start, sli.stop, sli.step))
+
+    res = c.pyapi.call_function_objargs(class_obj, pyargs)
+
+    for obj in pyargs:
+        c.pyapi.decref(obj)
+
+    c.builder.store(res, ret_ptr)       # may be null
+    return c.builder.load(ret_ptr)
+
+
 #
 # pdarray creation
 #
-def create_generic_lowering(func):
-    def imp_creator(context, builder, sig, args):
+def create_generic_lowering(func, module="arkouda"):
+    def imp_generic_lowering(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
         gil_state = pyapi.gil_ensure()
 
         # actual array creation through Python API
-        ak_name = context.insert_const_string(builder.module, "arkouda")
-        ak_mod = pyapi.import_module_noblock(ak_name)
+        mod_name = context.insert_const_string(builder.module, module)
+        mod = pyapi.import_module_noblock(mod_name)
 
         pykwds = None
         for iarg, arg in enumerate(sig.args):
@@ -340,53 +378,70 @@ def create_generic_lowering(func):
             pyargb = pyapi.from_native_value(sig.args[iarg], arg, env_manager)
             pyapi.tuple_setitem(pyargs, iarg, pyargb)  # steals reference
 
-        pyf = pyapi.object_getattr_string(ak_mod, func.__name__)
-        pda = pyapi.call(pyf, pyargs, pykwds)
+        pyf = pyapi.object_getattr_string(mod, func.__name__)
+        pyres = pyapi.call(pyf, pyargs, pykwds)
 
         pyapi.decref(pyf)
         pyapi.decref(pyargs)
         if pykwds is not None:
             pyapi.decref(pykwds)
-        pyapi.decref(ak_mod)
+        pyapi.decref(mod)
 
+        err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
         pyapi.gil_release(gil_state)
+
+        with nb_cgu.if_unlikely(builder, err_occurred):
+            builder.ret(ir.Constant(ir_errcode, -1))
 
         # return result as a PyObject*
         result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-        builder.store(pda, result)
+        builder.store(pyres, result)
         return builder.load(result)
 
-    return imp_creator
+    return imp_generic_lowering
 
 
 #
 # numeric/arithmetic operations on pdarray
 #
-def create_lowering_op(op):
+def create_lowering_op(op, binop=True):
     def imp_op(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
         gil_state = pyapi.gil_ensure()
 
         # box the arguments
         c = nb_pyapi._BoxContext(context, builder, pyapi, None)
-        self_idx = 0; other_idx = 1
-        if not isinstance(sig.args[0], PDArrayType):
-            self_idx = 1; other_idx = 0
 
-        pyself = box_pyobject(sig.args[self_idx], args[self_idx], c)
-        if isinstance(sig.args[other_idx], PDArrayType):
-            pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], c),)
+        if binop:
+            # assume associativity
+            self_idx = 0; other_idx = 1
+            if not isinstance(sig.args[0], PDArrayType):
+                self_idx = 1; other_idx = 0
+
+            pyself = box_pyobject(sig.args[self_idx], args[self_idx], c)
+            if isinstance(sig.args[other_idx], PDArrayType):
+                pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], c),)
+            else:
+                env_manager = context.get_env_manager(builder)
+                pyargs = (pyapi.from_native_value(sig.args[other_idx], args[other_idx], env_manager),)
         else:
+            # regular dispatch of self and 1 or more args
+            pyself = box_pyobject(sig.args[0], args[0], c)
             env_manager = context.get_env_manager(builder)
-            pyargs = (pyapi.from_native_value(sig.args[other_idx], args[other_idx], env_manager),)
+            pyargs = tuple(pyapi.from_native_value(
+                sig.args[idx], args[idx], env_manager) for idx in range(1, len(args)))
 
         # call the Python-side method
         pda = pyapi.call_method(pyself, "__%s__" % op.__name__, pyargs)
-        pyapi.incref(pda)
 
+        err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
         pyapi.gil_release(gil_state)
 
+        with nb_cgu.if_unlikely(builder, err_occurred):
+            builder.ret(ir.Constant(ir_errcode, -1))
+
         # return result as a void ptr
+        pyapi.incref(pda)
         result = nb_cgu.alloca_once(builder, pyapi.pyobj)
         builder.store(pda, result)
         return builder.load(result)
@@ -394,6 +449,7 @@ def create_lowering_op(op):
     return imp_op
 
 
+# arithmetic
 for op in (operator.mul, operator.imul,
            operator.add, operator.iadd,
            operator.sub, operator.isub,
@@ -406,8 +462,18 @@ for op in (operator.mul, operator.imul,
         nb_iutils.lower_builtin(op, pdarray_type, x)(create_lowering_op(op))
         nb_iutils.lower_builtin(op, x, pdarray_type)(create_lowering_op(op))
 
+# comparison
 for op in (operator.eq, operator.ne):
     nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
+
+# indexing
+for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
+    nb_iutils.lower_builtin(operator.getitem, pdarray_type, idx_type)(
+        create_lowering_op(operator.getitem, binop=False))
+
+    for x in ak_types + [pdarray_type]:
+        nb_iutils.lower_builtin(operator.setitem, pdarray_type, idx_type, x)(
+            create_lowering_op(operator.setitem, binop=False))
 
 
 # -- automatic overloading of Arkouda APIs ----------------------------------
