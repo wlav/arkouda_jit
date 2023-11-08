@@ -34,7 +34,7 @@ ir_voidptr = ir.PointerType(ir_byte)  # by convention
 ir_byteptr = ir_voidptr  # for clarity
 ir_errcode = ir.IntType(32)
 
-ak_types = [nb_types.int64, nb_types.float64]
+ak_types = [nb_types.int64, nb_types.float64, nb_types.bool_]
 
 
 def type_remap(t: nb_types.Type) -> type:
