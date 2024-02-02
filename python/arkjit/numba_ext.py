@@ -88,6 +88,118 @@ register_type(np.dtype, opaque_py_type)
 
 
 #
+# helper for methods
+#
+class PDArrayMethod(nb_types.Callable):
+    def __init__(self, func):
+        super(PDArrayMethod, self).__init__('pdarray.%s' % func.__name__)
+
+        self.sig = None
+        self._func = func
+
+    def is_precise(self):
+        return True          # only b/c of the use of opaque types where necessary
+
+    def get_call_type(self, context, args, kwds):
+        if self.sig is not None:
+            return self.sig
+
+        pysig = inspect.signature(self._func)
+
+        return_type = opaque_py_type
+        if pysig.return_annotation in ('pdarray', ak.pdarray):
+            return_type = pdarray_type
+
+        self.sig = pda_signature("method", return_type, args, kwds, func=self._func, recvr=pdarray_type)
+
+        print("sig:", self.sig)
+
+        @nb_iutils.lower_getattr(pdarray_type, self._func.__name__)#, *args)
+        def lower_method_call(context, builder, typ, args, name=self._func.__name__):
+            print("GATENKAAS!", len(args), args)
+
+            pyapi = context.get_python_api(builder)
+            gil_state = pyapi.gil_ensure()
+
+            # box the arguments
+            c = nb_pyapi._BoxContext(context, builder, pyapi, None)
+
+            # regular dispatch of self and 1 or more args
+            pyself = box_pyobject(typ, args, c)
+            env_manager = context.get_env_manager(builder)
+            pyargs = tuple(pyapi.from_native_value(
+                sig.args[idx], args[idx], env_manager) for idx in range(1, len(args)))
+
+            # call the Python-side method
+            pda = pyapi.call_method(pyself, name, pyargs)
+
+            err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
+            pyapi.gil_release(gil_state)
+
+            with nb_cgu.if_unlikely(builder, err_occurred):
+                builder.ret(ir.Constant(ir_errcode, -1))
+
+            # return result as a void ptr
+            pyapi.incref(pda)
+            result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+            builder.store(pda, result)
+            return builder.load(result)
+
+        print("returning ....")
+        return self.sig
+
+        ol = CppFunctionNumbaType(self._func.__overload__(numba_arg_convertor(args)), self._is_method)
+
+        thistype = None
+        if self._is_method:
+            thistype = nb_types.voidptr
+
+        self.ret_type = cpp2numba(ol._func.__cpp_reflex__(cpp_refl.RETURN_TYPE))
+        ol.sig = nb_typing.Signature(
+            return_type=self.ret_type,
+            args=args,
+            recvr=thistype)
+
+        extsig = ol.sig
+        if self._is_method:
+            self.ret_type = ol.sig.return_type
+            args = (nb_types.voidptr, *args)
+            extsig = nb_typing.Signature(
+                return_type=ol.sig.return_type, args=args, recvr=None)
+
+        self._impl_keys[args] = ol
+        self._arg_set_matched = numba_arg_convertor(args)
+
+
+        @nb_iutils.lower_builtin(ol, *args)
+        def lower_external_call(context, builder, sig, args,
+                ty=nb_types.ExternalFunctionPointer(extsig, ol.get_pointer), pyval=self._func, is_method=self._is_method):
+            ptrty = context.get_function_pointer_type(ty)
+            ptrval = context.add_dynamic_addr(
+                builder, ty.get_pointer(pyval), info=str(pyval))
+            fptr = builder.bitcast(ptrval, ptrty)
+            return context.call_function_pointer(builder, fptr, args)
+
+        return ol.sig
+
+    def get_call_signatures(self):
+        print("CALL SIGANTURES:", self.sig)
+        return [self.sig], False
+
+    def get_impl_key(self, sig):
+        print("FROM KEY:", sig)
+        return self
+
+    @property
+    def key(self):
+        return self._func
+
+@nb_iutils.lower_constant(PDArrayMethod)
+def frozen_method(context, builder, ty, pyval):
+    return
+
+
+#
 # overload construction
 #
 class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
@@ -479,6 +591,31 @@ for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
 
 
 # -- automatic overloading of Arkouda APIs ----------------------------------
+
+#
+# pdarray methods
+#
+@nb_tmpl.infer_getattr
+class PDArrayFieldResolver(nb_tmpl.AttributeTemplate):
+    key = PDArrayType
+
+    def generic_resolve(self, typ, attr):
+        ft = typ.__dict__.get(attr, None)
+        if ft is not None:
+            return ft
+
+        if not isinstance(typ, PDArrayType):
+            return
+
+        try:
+            _f = getattr(ak.pdarray, attr)
+            if inspect.isfunction(_f):
+                ft = PDArrayMethod(_f)
+                typ.__dict__[attr] = ft
+                return ft
+        except AttributeError:
+            pass
+
 
 #
 # pdarray creation
