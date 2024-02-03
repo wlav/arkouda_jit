@@ -72,8 +72,25 @@ nb_ext.typeof_impl.register(type(_dummy))(typeof_inline_function)
 
 # -- compiler which adds custom Arkouda passes ------------------------------
 class ArkoudaCompiler(nb_cmp.CompilerBase):
+    opt_passes = "all"
+
+    def __init__(self, typingctx, targetctx, library, args, return_type, flags, locals):
+        super().__init__(
+            typingctx, targetctx, library, args, return_type, flags, locals)
+
+        enable_all = self.opt_passes == "all"
+
+        self.cse_pass      = enable_all or "cse" in self.opt_passes
+        self.function_pass = enable_all or "function" in self.opt_passes
+
+        self.force_inline  = enable_all or "inline" in self.opt_passes
+
+
     def compile_extra(self, func):
-        with typeof_inline_function, CompilerState(typeof_inline_function, self.state):
+        if self.force_inline:
+            with typeof_inline_function, CompilerState(typeof_inline_function, self.state):
+                result = super(ArkoudaCompiler, self).compile_extra(func)
+        else:
             result = super(ArkoudaCompiler, self).compile_extra(func)
         return result
 
@@ -82,10 +99,12 @@ class ArkoudaCompiler(nb_cmp.CompilerBase):
         pm = nb_cmp.DefaultPassBuilder.define_nopython_pipeline(self.state)
 
         # function pass example
-        pm.add_pass_after(ArkoudaFunctionPass, nb_untyped_pass.IRProcessing)
+        if self.function_pass:
+            pm.add_pass_after(ArkoudaFunctionPass, nb_untyped_pass.IRProcessing)
 
         # common subexpression elimination, first pass after typing is done
-        pm.add_pass_after(ArkoudaCSE, nb_typed_pass.AnnotateTypes)
+        if self.cse_pass:
+            pm.add_pass_after(ArkoudaCSE, nb_typed_pass.AnnotateTypes)
 
         pm.finalize()
         return [pm]
@@ -96,6 +115,16 @@ def optimize(*args, **kwds):
     # Numba compiler with Arkouda-specific passes and run in
     # object mode by default (to allow simple re-use of Arkouda's
     # pdarray class as-is to generate messages)
+
+    # filter ArkoudaCompiler-specific options
+    opt_passes = kwds.get("passes", None)
+    if opt_passes is not None:
+        # there's no good way to communicate additional options through the
+        # Numba compiler definition, this global setting will have to do
+        ArkoudaCompiler.opt_passes = opt_passes
+        del kwds["passes"]
+
+    # use the Arkouda compiler and force nopython mode (soon the only choice)
     kwds["pipeline_class"] = ArkoudaCompiler
     kwds["nopython"] = True
 
