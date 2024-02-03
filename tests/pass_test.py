@@ -32,7 +32,7 @@ class PassTests(ArkoudaJITTest):
             B = A*A + A*A
             return B
 
-        assert self.verify(locals())
+        assert self.verify(locals(), passes=("cse",))
 
         assert PassTests.binop_counter == \
                  3 + 2            # calc1

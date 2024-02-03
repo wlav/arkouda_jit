@@ -14,10 +14,10 @@ ARRAY_SIZE = 1000000
 
 
 #- common benchmark harness --------------------------------------------------
-def basic_bench(benchmark, func, optimize, *args, **kwds):
+def basic_bench(benchmark, func, optimize, passes="all", *args, **kwds):
     call = func
     # optimization is done outside benchmark loop, so no warmup call needed
-    if optimize: call = arkjit.optimize()(call)
+    if optimize: call = arkjit.optimize(passes=passes)(call)
     try:
         ArkoudaJITBench.setUpClass()
         with ArkoudaJITBench() as context:
@@ -35,7 +35,7 @@ def local_cse():
 all_benchmarks.append(('common-subexpr-elemination', (
 """
 def test_{0}_local_cse(benchmark, optimize={1}):
-    basic_bench(benchmark, local_cse, optimize)
+    basic_bench(benchmark, local_cse, optimize, passes=("cse",))
 """,
 )))
 

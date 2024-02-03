@@ -9,10 +9,10 @@ import numpy as np
 class ArkoudaJITTest(ArkoudaTest):
     """Base class for JIT tests"""
 
-    def compare(self, forg, *args, **kwds):
+    def compare(self, passes, forg, *args, **kwds):
         res0 = forg(*args, **kwds)
 
-        fopt = arkjit.optimize()(forg)
+        fopt = arkjit.optimize(passes=passes)(forg)
         res1 = fopt(*args, **kwds)
 
         if isinstance(res0, (ak.pdarray, ak.Strings)):
@@ -23,10 +23,10 @@ class ArkoudaJITTest(ArkoudaTest):
             else:
                 assert res0 == res1
 
-    def verify(self, stack):
+    def verify(self, stack, passes="all"):
         if isinstance(stack, dict):
             stack = stack.values()
 
         for count, c in enumerate((f for f in stack if inspect.isfunction(f)), 1):
-            self.compare(c)
+            self.compare(passes, c)
         return count
