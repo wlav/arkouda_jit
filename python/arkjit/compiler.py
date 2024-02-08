@@ -6,6 +6,7 @@ import sys
 
 import numba.core.compiler as nb_cmp
 import numba.core.decorators as nb_dec
+import numba.core.dispatcher as nb_disp
 import numba.core.typed_passes as nb_typed_pass
 import numba.core.types as nb_types
 import numba.core.untyped_passes as nb_untyped_pass
@@ -28,15 +29,19 @@ class InlineUndefinedFunctionType(nb_types.UndefinedFunctionType):
 
 
 class CompilerState:
-    def __init__(self, f, state):
-        self.f = f
+    def __init__(self, target, typer, state):
+        self.target = target
+        self.typer = typer
         self.state = state
 
     def __enter__(self):
-        self.f.state = self.state
+        self.typer.state = self.state
+        if self.typer.top is None:
+            self.typer.top = self.target
 
     def __exit__(self, tp, val, trace):
-        self.f.state = None
+        self.typer.top = None
+        self.typer.state = None
 
 
 class TypeofInlineFunction:
@@ -44,6 +49,8 @@ class TypeofInlineFunction:
 
     def __init__(self):
         self._is_active = False
+        self.state = None
+        self.top = None
 
     def __enter__(self):
         self._is_active = True
@@ -52,10 +59,21 @@ class TypeofInlineFunction:
         self._is_active = False
 
     def __call__(self, val, c):
-        if not self._is_active or val.__module__ != "__main__":
+        # TODO: not every function can be auto-inlined, and functions may
+        # have overloads instead. Therefore, restrict inline to only the
+        # main module (interactive use) or functions in the same module as
+        # the current function being JITed.
+        if not self._is_active or (self.top and\
+               (val.__module__ != "__main__" and val.__module__ != self.top.__module__)):
             return None
 
-        # register dispatcher with Numba
+        # check whether the function has already been replaced (we get here
+        # for each call of the function in the closure being compiled)
+        disp = getattr(sys.modules[val.__module__], val.__name__)
+        if isinstance(disp, nb_disp.Dispatcher):
+             return nb_types.Dispatcher(disp)
+
+        # register dispatcher with Numba (will compile on use)
         disp = optimize(inline="always")(val)
 
         # place the dispatcher back into the module to ensure next call goes
@@ -88,7 +106,7 @@ class ArkoudaCompiler(nb_cmp.CompilerBase):
 
     def compile_extra(self, func):
         if self.force_inline:
-            with typeof_inline_function, CompilerState(typeof_inline_function, self.state):
+            with typeof_inline_function, CompilerState(func, typeof_inline_function, self.state):
                 result = super(ArkoudaCompiler, self).compile_extra(func)
         else:
             result = super(ArkoudaCompiler, self).compile_extra(func)
@@ -122,6 +140,8 @@ def optimize(*args, **kwds):
         # there's no good way to communicate additional options through the
         # Numba compiler definition, this global setting will have to do
         ArkoudaCompiler.opt_passes = opt_passes
+        if "inline" in opt_passes and not "inline" in kwds:
+            kwds["inline"] = "always"
         del kwds["passes"]
 
     # use the Arkouda compiler and force nopython mode (soon the only choice)
