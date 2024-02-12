@@ -7,7 +7,9 @@ import numba.core.compiler_machinery as nb_cpl
 import numba.core.ir as nb_ir
 import numba.core.ir_utils as nb_iru
 
-from .numba_ext import PDArrayBinOpSignature
+from .numba_ext import (PDArrayType,
+                        PDArrayBinOpSignature,
+                        )
 
 __all__ = [
     "ArkoudaFunctionPass",
@@ -49,7 +51,7 @@ class AutoFunctionInlinerPass(nb_cpl.FunctionPass):
         completed = dict()
         while work_list:
             _label, block = work_list.pop()
-            for i, instr in enumerate(block.body):
+            for instr in block.body:
                 if isinstance(instr, nb_ir.Assign):
                     expr = instr.value
                     if isinstance(expr, nb_ir.Expr) and expr.op == 'call':
@@ -82,21 +84,41 @@ class ArkoudaCSE(nb_cpl.LoweringPass):
     def run_pass(self, state):
         print("Arkouda common subexpression elimination pass")
 
+        modified = False
+
         for block in state.func_ir.blocks.values():
             pda_expr = dict()
-            for stmt in block.body:
-                try:
-                    if isinstance(state.calltypes[stmt.value], PDArrayBinOpSignature):
-                        key = (stmt.value.op, stmt.value.lhs, stmt.value.rhs)
-                        seen = pda_expr.get(key, None)
-                        if seen is not None:
-                            stmt.value = seen.target
-                        else:
-                            pda_expr[key] = stmt
-                except KeyError:  # not part of the original Python
-                    pass
+            canonical = dict()
+            for instr in block.body:
+                if not isinstance(instr, nb_ir.Assign):
+                    continue
 
-        return True
+                # lookup original typed python statement (if none, then
+                # this IR statement was added by a Numba pass)
+                ct = state.calltypes.get(instr.value, None)
+                if isinstance(ct, PDArrayBinOpSignature):
+                    lhs = canonical.get(instr.value.lhs.name, instr.value.lhs)
+                    rhs = canonical.get(instr.value.rhs.name, instr.value.rhs)
+                    key = (instr.value.op, lhs, rhs)
+
+                    seen = pda_expr.get(key, None)
+                    if seen is not None:
+                        instr.value = seen.target
+                        modified = True
+                    else:
+                        pda_expr[key] = instr
+
+                    continue
+
+                # track assignments from inlines
+                if isinstance(instr.value, nb_ir.Var):
+                    tp = state.typemap.get(instr.value.name, None)
+                    if isinstance(tp, PDArrayType):
+                        canonical[instr.target.name] = instr.value
+
+                    continue
+
+        return modified
 
     def __str__(self):
         return "common subexpression elimination for PDArrays"
