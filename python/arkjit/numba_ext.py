@@ -112,12 +112,8 @@ class PDArrayMethod(nb_types.Callable):
 
         self.sig = pda_signature("method", return_type, args, kwds, func=self._func, recvr=pdarray_type)
 
-        print("sig:", self.sig)
-
         @nb_iutils.lower_getattr(pdarray_type, self._func.__name__)#, *args)
         def lower_method_call(context, builder, typ, args, name=self._func.__name__):
-            print("GATENKAAS!", len(args), args)
-
             pyapi = context.get_python_api(builder)
             gil_state = pyapi.gil_ensure()
 
@@ -145,7 +141,6 @@ class PDArrayMethod(nb_types.Callable):
             builder.store(pda, result)
             return builder.load(result)
 
-        print("returning ....")
         return self.sig
 
         ol = CppFunctionNumbaType(self._func.__overload__(numba_arg_convertor(args)), self._is_method)
@@ -183,11 +178,9 @@ class PDArrayMethod(nb_types.Callable):
         return ol.sig
 
     def get_call_signatures(self):
-        print("CALL SIGANTURES:", self.sig)
         return [self.sig], False
 
     def get_impl_key(self, sig):
-        print("FROM KEY:", sig)
         return self
 
     @property
