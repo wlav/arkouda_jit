@@ -4,6 +4,11 @@ from common import ArkoudaJITTest
 from context import arkouda as ak
 
 
+# helper to test auto comilation/inlining
+def sqr(A):
+    return A*A
+
+
 class PassTests(ArkoudaJITTest):
     """Test JITed pdarray set operations"""
 
@@ -33,6 +38,19 @@ class PassTests(ArkoudaJITTest):
             return B
 
         assert self.verify(locals(), passes=("cse",))
+
+        assert PassTests.binop_counter == \
+                 3 + 2            # calc1
+
+    def test_auto_inline(self):
+        """Inline functions to enable CSE"""
+
+        def calc1():
+            A = ak.arange(10)
+            B = sqr(A) + A*A #sqr(A)
+            return B
+
+        assert self.verify(locals(), passes=("auto", "cse",))
 
         assert PassTests.binop_counter == \
                  3 + 2            # calc1
