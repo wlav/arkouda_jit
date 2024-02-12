@@ -12,7 +12,7 @@ import numba.core.untyped_passes as nb_untyped_pass
 from .passes import (AutoFunctionInlinerPass,
                      ArkoudaCSE,
                      ArkoudaFunctionPass,
-                    )
+                     )
 
 __all__ = ["optimize", "ArkoudaCompiler"]
 
