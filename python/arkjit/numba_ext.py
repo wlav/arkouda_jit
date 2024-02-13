@@ -143,40 +143,6 @@ class PDArrayMethod(nb_types.Callable):
 
         return self.sig
 
-        ol = CppFunctionNumbaType(self._func.__overload__(numba_arg_convertor(args)), self._is_method)
-
-        thistype = None
-        if self._is_method:
-            thistype = nb_types.voidptr
-
-        self.ret_type = cpp2numba(ol._func.__cpp_reflex__(cpp_refl.RETURN_TYPE))
-        ol.sig = nb_typing.Signature(
-            return_type=self.ret_type,
-            args=args,
-            recvr=thistype)
-
-        extsig = ol.sig
-        if self._is_method:
-            self.ret_type = ol.sig.return_type
-            args = (nb_types.voidptr, *args)
-            extsig = nb_typing.Signature(
-                return_type=ol.sig.return_type, args=args, recvr=None)
-
-        self._impl_keys[args] = ol
-        self._arg_set_matched = numba_arg_convertor(args)
-
-
-        @nb_iutils.lower_builtin(ol, *args)
-        def lower_external_call(context, builder, sig, args,
-                ty=nb_types.ExternalFunctionPointer(extsig, ol.get_pointer), pyval=self._func, is_method=self._is_method):
-            ptrty = context.get_function_pointer_type(ty)
-            ptrval = context.add_dynamic_addr(
-                builder, ty.get_pointer(pyval), info=str(pyval))
-            fptr = builder.bitcast(ptrval, ptrty)
-            return context.call_function_pointer(builder, fptr, args)
-
-        return ol.sig
-
     def get_call_signatures(self):
         return [self.sig], False
 
@@ -352,7 +318,9 @@ class PDArrayBinOp(nb_tmpl.ConcreteTemplate):
         [pda_signature("binop", pdarray_type, (x, pdarray_type)) for x in ak_types]
 
 def _binop_type(op):
-    kls = type('PDArrayBinOp'+op.__name__.upper(), (PDArrayBinOp,), {})
+    kls = type('PDArrayBinOp'+op.__name__.upper(),
+               (PDArrayBinOp,),
+               {'__module__': PDArrayBinOp.__module__})
     nb_tmpl.infer_global(op)(kls)
     return kls
 
