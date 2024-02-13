@@ -75,6 +75,8 @@ opaque_py_type = OpaquePyType()
 # main arkouda types
 #
 class PDArrayType(nb_types.Type):
+    mutable = True       # ie. type is allowed to be lhs
+
     def __init__(self) -> None:
         super(PDArrayType, self).__init__(name="PDArray")
 
