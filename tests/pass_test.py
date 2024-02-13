@@ -20,9 +20,16 @@ class PassTests(ArkoudaJITTest):
             B = A*A + A*A
             return B
 
+        def calc2():
+            A = ak.arange(10)
+            B = A*A
+            B += A*A
+            return B
+
         assert self.verify(locals(), passes=("cse",))
 
         assert self.counts[(calc1, 'binop', True)] == 2
+        assert self.counts[(calc2, 'binop', True)] == 1
 
     def test_auto_inline(self):
         """Inline functions to enable CSE"""
