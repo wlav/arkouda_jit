@@ -16,7 +16,6 @@ import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
 import numba.core.pythonapi as nb_pyapi
 import numba.core.types as nb_types
-import numba.core.typing.builtins as nb_blt
 import numba.core.typing.templates as nb_tmpl
 import numba.extending as nb_ext
 import numpy as np
@@ -284,7 +283,7 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
 
         def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
             typed_args = self.typeof_args(func, args, kwds)
-            self.register_lowering(func, args, create_generic_lowering)
+            self.register_lowering(func, typed_args, create_generic_lowering)
 
           # derive return type from annotation or arguments; intent is
           # only to identify pdarray's for optimizing passes: in all
@@ -293,6 +292,14 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
             return_type = None
             if pysig.return_annotation in ('pdarray', ak.pdarray):
                 return_type = pdarray_type
+            elif py_typing.get_origin(pysig.return_annotation) == tuple:
+                rtargs = list()
+                for a in py_typing.get_args(pysig.return_annotation):
+                    if a in ('pdarray', ak.pdarray):
+                        rtargs.append(pdarray_type)
+                    else:
+                        rtargs.append(opaque_py_type)
+                return_type = nb_types.Tuple(rtargs)
             else:
                 # some heuristics
                 if len(typed_args) == 1 and isinstance(typed_args[0], nb_types.containers.List):
@@ -470,9 +477,18 @@ def create_generic_lowering(func, module="arkouda"):
         with nb_cgu.if_unlikely(builder, err_occurred):
             builder.ret(ir.Constant(ir_errcode, -1))
 
-        # return result as a PyObject*
-        result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-        builder.store(pyres, result)
+        # return result as a PyObject* or an unrolled tuple for mulitple returns
+        if isinstance(sig.return_type, nb_types.Tuple):
+            size = sig.return_type.count
+            pack = ir.LiteralStructType([pyapi.pyobj]*size)
+            result = nb_cgu.alloca_once(builder, pack)
+            unrolled = list()
+            for i in range(size):
+                unrolled.append(pyapi.tuple_getitem(pyres, i))
+            builder.store(nb_cgu.make_anonymous_struct(builder, unrolled), result)
+        else:
+            result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+            builder.store(pyres, result)
         return builder.load(result)
 
     return imp_generic_lowering
