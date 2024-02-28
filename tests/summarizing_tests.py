@@ -35,3 +35,14 @@ class SummarizingTests(ArkoudaJITTest):
             return A.std()
 
         assert self.verify(locals())
+
+    def test_histogram(self):
+        """JITing of pdarray histogram method"""
+
+        def calc1():
+            A = ak.arange(0, 10, 1)
+            nbins = 3
+            h, b = ak.histogram(A, bins=nbins)
+            return b
+
+        assert self.verify(locals())
