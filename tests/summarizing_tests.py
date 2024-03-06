@@ -43,6 +43,15 @@ class SummarizingTests(ArkoudaJITTest):
             A = ak.arange(0, 10, 1)
             nbins = 3
             h, b = ak.histogram(A, bins=nbins)
-            return b
+            return h, b
+
+        assert self.verify(locals())
+
+    def test_value_counts(self):
+        """JITing of the value_counts method"""
+
+        def calc1():
+            A = ak.array([2, 0, 2, 4, 0, 0])
+            return ak.value_counts(A)
 
         assert self.verify(locals())

@@ -15,6 +15,16 @@ class ArkoudaJITTest(ArkoudaTest):
         super().__init__(*args, **kwds)
         self.counts = dict()
 
+    def _assert_equal(self, res0, res1):
+        if isinstance(res0, (ak.pdarray, ak.Strings)):
+            assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
+        elif isinstance(res0, np.ndarray):
+            assert sum(res0 == res1) == len(res0)
+        elif type(res0) == np.float64:
+            assert round(res0-res1, 14) == 0
+        else:
+            assert res0 == res1
+
     def compare(self, passes, forg, *args, **kwds):
         self.reset_counters()
         res0 = forg(*args, **kwds)
@@ -26,13 +36,11 @@ class ArkoudaJITTest(ArkoudaTest):
         res1 = fopt(*args, **kwds)
         self.record_counters(forg, optimized=True)
 
-        if isinstance(res0, (ak.pdarray, ak.Strings)):
-            assert sum(res0.to_ndarray() == res1.to_ndarray()) == len(res0)
+        if isinstance(res0, tuple):
+            for r0, r1 in zip(res0, res1):
+                self._assert_equal(r0, r1)
         else:
-            if type(res0) == np.float64:
-                assert round(res0-res1, 14) == 0
-            else:
-                assert res0 == res1
+            self._assert_equal(res0, res1)
 
     def setup_class(cls):
         ArkoudaJITTest._binop = ak.pdarray._binop
