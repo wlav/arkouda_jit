@@ -11,10 +11,12 @@ import arkouda.numeric as aknum
 import arkouda.pdarrayclass as akclass
 import arkouda.pdarraycreation as akcreate
 import arkouda.pdarraysetops as aksetops
+import arkouda.sorting as aksorting
 import numba
 import numba.core.cgutils as nb_cgu
 import numba.core.imputils as nb_iutils
 import numba.core.pythonapi as nb_pyapi
+import numba.core.registry as nb_reg
 import numba.core.types as nb_types
 import numba.core.typing.templates as nb_tmpl
 import numba.extending as nb_ext
@@ -35,6 +37,14 @@ ir_errcode = ir.IntType(32)
 
 ak_types = [nb_types.int64, nb_types.float64, nb_types.bool_]
 
+def target_refresh():
+    """
+    Update registries mid-compilation after having registered new lowering
+    implementations at run-time.
+    """
+
+    nb_reg.cpu_target.target_context.refresh()
+
 
 def type_remap(t: nb_types.Type) -> type:
     if isinstance(t, nb_types.Integer):
@@ -54,6 +64,29 @@ def register_type(pytype, identifier):
         return identifier
 
     return identifier
+
+
+def from_native_with_ref(c, b, pyapi, ty, v, env):
+    # from_native_value steals a reference from the original ll value, the
+    # numba-runtime incref adds one C-side
+    c.nrt.incref(b, ty, v)
+    return pyapi.from_native_value(ty, v, env)
+
+
+def pyargs_from_native(context, builder, argtypes, argvalues):
+    pyapi = context.get_python_api(builder)
+    boxctxt = nb_pyapi._BoxContext(context, builder, pyapi, None)
+    env = context.get_env_manager(builder)
+
+    pyargs = list()
+    for ty, v in zip(argtypes, argvalues):
+        if isinstance(ty, PDArrayType):
+            pyarg = box_pyobject(ty, v, boxctxt)
+        else:
+            pyarg = from_native_with_ref(context, builder, pyapi, ty, v, env)
+        pyargs.append(pyarg)
+
+    return pyargs
 
 
 # -- pdarray typing ---------------------------------------------------------
@@ -111,21 +144,23 @@ class PDArrayMethod(nb_types.Callable):
         if pysig.return_annotation in ('pdarray', ak.pdarray):
             return_type = pdarray_type
 
-        self.sig = pda_signature("method", return_type, args, kwds, func=self._func, recvr=pdarray_type)
+        # TODO: verify given args against pysig args
 
-        @nb_iutils.lower_getattr(pdarray_type, self._func.__name__)#, *args)
-        def lower_method_call(context, builder, typ, args, name=self._func.__name__):
+        # user a recvr ('self') as that will play better with BoundFunction, even
+        # as the key used is an unbound method with 'self' explicitly added as an
+        # argument to match against
+        self.sig = pda_signature(
+            "method", return_type, args, kwds, func=self._func, recvr=pdarray_type)
+
+        @nb_iutils.lower_builtin((PDArrayType, self._func.__name__), pdarray_type, *args)
+        def lower_method(context, builder, typ, val, name=self._func.__name__):
             pyapi = context.get_python_api(builder)
             gil_state = pyapi.gil_ensure()
 
-            # box the arguments
-            c = nb_pyapi._BoxContext(context, builder, pyapi, None)
-
-            # regular dispatch of self and 1 or more args
-            pyself = box_pyobject(typ, args, c)
-            env_manager = context.get_env_manager(builder)
-            pyargs = tuple(pyapi.from_native_value(
-                sig.args[idx], args[idx], env_manager) for idx in range(1, len(args)))
+            # box the arguments: regular dispatch of self and 1 or more args
+            boxctxt = nb_pyapi._BoxContext(context, builder, pyapi, None)
+            pyself = box_pyobject(typ, val[0], boxctxt)
+            pyargs = tuple(pyargs_from_native(context, builder, self.sig.args[1:], args[1:]))
 
             # call the Python-side method
             pda = pyapi.call_method(pyself, name, pyargs)
@@ -137,10 +172,11 @@ class PDArrayMethod(nb_types.Callable):
                 builder.ret(ir.Constant(ir_errcode, -1))
 
             # return result as a void ptr
-            pyapi.incref(pda)
             result = nb_cgu.alloca_once(builder, pyapi.pyobj)
             builder.store(pda, result)
             return builder.load(result)
+
+        target_refresh()
 
         return self.sig
 
@@ -148,15 +184,11 @@ class PDArrayMethod(nb_types.Callable):
         return [self.sig], False
 
     def get_impl_key(self, sig):
-        return self
+        return (PDArrayType, self._func.__name__)
 
     @property
     def key(self):
         return self._func
-
-@nb_iutils.lower_constant(PDArrayMethod)
-def frozen_method(context, builder, ty, pyval):
-    return
 
 
 #
@@ -199,6 +231,7 @@ class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
             decorate = nb_iutils.lower_builtin(func, *lower_args)
             decorate(lowering(func))
             self._lowered[func].add(lower_args)
+            target_refresh()
 
 
 #
@@ -285,9 +318,9 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
             typed_args = self.typeof_args(func, args, kwds)
             self.register_lowering(func, typed_args, create_generic_lowering)
 
-          # derive return type from annotation or arguments; intent is
-          # only to identify pdarray's for optimizing passes: in all
-          # cases, the generated lowering expects a generic PyObject
+            # derive return type from annotation or arguments; intent is
+            # only to identify pdarray's for optimizing passes: in all
+            # cases, the generated lowering expects a generic PyObject
             pysig = inspect.signature(func)
             return_type = None
             if pysig.return_annotation in ('pdarray', ak.pdarray):
@@ -453,14 +486,14 @@ def create_generic_lowering(func, module="arkouda"):
             # no keywords case
             rl_args = args
 
-        env_manager = context.get_env_manager(builder)
+        env = context.get_env_manager(builder)
 
         pyargs = pyapi.tuple_new(len(rl_args))
         for iarg, arg in enumerate(rl_args):
-            # from_native_value steals a reference from the original `arg`
-            context.nrt.incref(builder, sig.args[iarg], arg)
-            pyargb = pyapi.from_native_value(sig.args[iarg], arg, env_manager)
-            pyapi.tuple_setitem(pyargs, iarg, pyargb)  # steals reference
+            pyargb = from_native_with_ref(
+                context, builder, pyapi, sig.args[iarg], arg, env)
+            pyapi.incref(pyargb)  # tuple_setitem will steals a reference
+            pyapi.tuple_setitem(pyargs, iarg, pyargb)
 
         pyf = pyapi.object_getattr_string(mod, func.__name__)
         pyres = pyapi.call(pyf, pyargs, pykwds)
@@ -484,10 +517,14 @@ def create_generic_lowering(func, module="arkouda"):
             result = nb_cgu.alloca_once(builder, pack)
             unrolled = list()
             for i in range(size):
-                unrolled.append(pyapi.tuple_getitem(pyres, i))
+                v = pyapi.tuple_getitem(pyres, i)
+                pyapi.incref(v)   # v is borrowed
+                unrolled.append(v)
             builder.store(nb_cgu.make_anonymous_struct(builder, unrolled), result)
+            pyapi.decref(pyres)
         else:
             result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+            pyapi.incref(pyres)
             builder.store(pyres, result)
         return builder.load(result)
 
@@ -503,7 +540,7 @@ def create_lowering_op(op, binop=True):
         gil_state = pyapi.gil_ensure()
 
         # box the arguments
-        c = nb_pyapi._BoxContext(context, builder, pyapi, None)
+        boxctxt = nb_pyapi._BoxContext(context, builder, pyapi, None)
 
         if binop:
             # assume associativity
@@ -511,18 +548,17 @@ def create_lowering_op(op, binop=True):
             if not isinstance(sig.args[0], PDArrayType):
                 self_idx = 1; other_idx = 0
 
-            pyself = box_pyobject(sig.args[self_idx], args[self_idx], c)
+            pyself = box_pyobject(sig.args[self_idx], args[self_idx], boxctxt)
             if isinstance(sig.args[other_idx], PDArrayType):
-                pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], c),)
+                pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], boxctxt),)
             else:
-                env_manager = context.get_env_manager(builder)
-                pyargs = (pyapi.from_native_value(sig.args[other_idx], args[other_idx], env_manager),)
+                env = context.get_env_manager(builder)
+                pyargs = (from_native_with_ref(
+                    context, builder, pyapi, sig.args[other_idx], args[other_idx], env),)
         else:
             # regular dispatch of self and 1 or more args
-            pyself = box_pyobject(sig.args[0], args[0], c)
-            env_manager = context.get_env_manager(builder)
-            pyargs = tuple(pyapi.from_native_value(
-                sig.args[idx], args[idx], env_manager) for idx in range(1, len(args)))
+            pyself = box_pyobject(sig.args[0], args[0], boxctxt)
+            pyargs = pyargs_from_native(context, builder, sig.args[1:], args[1:])
 
         # call the Python-side method
         pda = pyapi.call_method(pyself, "__%s__" % op.__name__, pyargs)
@@ -534,8 +570,8 @@ def create_lowering_op(op, binop=True):
             builder.ret(ir.Constant(ir_errcode, -1))
 
         # return result as a void ptr
-        pyapi.incref(pda)
         result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+        pyapi.incref(pda)
         builder.store(pda, result)
         return builder.load(result)
 
@@ -577,6 +613,7 @@ for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
 @nb_tmpl.infer_getattr
 class PDArrayFieldResolver(nb_tmpl.AttributeTemplate):
     key = PDArrayType
+    is_method = True    # TODO: does this matter for data fields?
 
     def generic_resolve(self, typ, attr):
         ft = typ.__dict__.get(attr, None)
@@ -589,9 +626,19 @@ class PDArrayFieldResolver(nb_tmpl.AttributeTemplate):
         try:
             _f = getattr(ak.pdarray, attr)
             if inspect.isfunction(_f):
-                ft = PDArrayMethod(_f)
-                typ.__dict__[attr] = ft
-                return ft
+                class PDMethodTemplate(nb_tmpl.AbstractTemplate):
+                    key = (self.key, attr)
+                    method = PDArrayMethod(_f)
+
+                    def generic(self, args, kws):
+                        sig = self.method.get_call_type(self.context, args, kws)
+                        return sig.as_method()
+
+                bf = nb_types.BoundFunction(PDMethodTemplate, typ)
+                typ.__dict__[attr] = bf
+
+                return bf
+
         except AttributeError:
             pass
 
@@ -604,7 +651,6 @@ for _fn in akcreate.__all__:
     if callable(_f):
         create_creator_overload(_f)
 
-
 #
 # operations
 #
@@ -614,3 +660,11 @@ for mod in [akclass, aknum, aksetops]:
         if callable(_f):
             create_annotated_overload(_f)
 
+#
+# sorting
+#
+for mod in [aksorting]:
+    for _fn in mod.__all__:
+        _f = getattr(mod, _fn)
+        if callable(_f):
+            create_annotated_overload(_f)
