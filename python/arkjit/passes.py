@@ -149,6 +149,8 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                             newbody.append(DecRef(defer, instr.loc))
                         del deferred[instr.value]
                         newbody.append(instr)
+                    else:
+                        newbody.append(instr)
 
                 elif isinstance(instr, nb_ir.Assign):
                     # References can be borrowed/stolen if used in certain ops (this
@@ -179,8 +181,8 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                 else:
                     newbody.append(instr)
 
-        if modified:
-            block.body = newbody
+            if modified:
+                block.body = newbody
 
         return modified
 
