@@ -524,7 +524,7 @@ def create_generic_lowering(func, module="arkouda"):
         with nb_cgu.if_unlikely(builder, err_occurred):
             builder.ret(ir.Constant(ir_errcode, -1))
 
-        # return result as a PyObject* or an unrolled tuple for mulitple returns
+        # return result as a PyObject* or an unrolled tuple for multiple returns
         if isinstance(sig.return_type, nb_types.Tuple):
             size = sig.return_type.count
             pack = ir.LiteralStructType([pyapi.pyobj]*size)

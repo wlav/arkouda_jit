@@ -39,7 +39,7 @@ class ArkoudaJITTest(ArkoudaTest):
         res1 = fopt(*args, **kwds)
         self.record_counters(forg, optimized=True)
 
-        if isinstance(res0, tuple) and res0:
+        if isinstance(res0, (tuple, list)) and res0:
             for r0, r1 in zip(res0, res1):
                 self._assert_equal(r0, r1)
             del r0, r1

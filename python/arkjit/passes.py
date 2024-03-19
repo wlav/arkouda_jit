@@ -160,10 +160,18 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                     # as the borrower will eventually be deleted as well.
                     expr = instr.value
                     if isinstance(expr, nb_ir.Expr):
-                        if expr.op == "cast" or expr.op == "getattr":
+                        if expr.op == "cast" and "return_value" in instr.target.name:
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
-                        elif expr.op == "build_list":
+                            else:      # not a pdarray, but may be a container
+                                try:
+                                    del deferred[expr.value.name]
+                                except KeyError:
+                                    pass
+                        elif expr.op == "getattr":
+                            if self._incref(expr.value.name, instr, state, newbody):
+                                modified = True
+                        elif expr.op == "build_list" or expr.op == "build_tuple":
                             to_defer = list()
                             for item in expr.items:
                                 if self._incref(item.name, instr, state, newbody):
