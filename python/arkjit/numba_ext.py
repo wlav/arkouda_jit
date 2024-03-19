@@ -81,12 +81,30 @@ def pyargs_from_native(context, builder, argtypes, argvalues):
     pyargs = list()
     for ty, v in zip(argtypes, argvalues):
         if isinstance(ty, PDArrayType):
-            pyarg = box_pyobject(ty, v, boxctxt)
+            pyarg = box_pyobject_with_ref(ty, v, boxctxt, pyapi)
         else:
             pyarg = from_native_with_ref(context, builder, pyapi, ty, v, env)
         pyargs.append(pyarg)
 
-    return pyargs
+    return tuple(pyargs)
+
+
+def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state):
+    pda = pyapi.call_method(pyself, name, pyargs)
+
+    err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
+
+    for pyarg in pyargs:
+        pyapi.decref(pyarg)
+    pyapi.decref(pyself)
+    pyapi.gil_release(gil_state)
+
+    with nb_cgu.if_unlikely(builder, err_occurred):
+        builder.ret(ir.Constant(ir_errcode, -1))
+
+    result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+    builder.store(pda, result)
+    return builder.load(result)
 
 
 # -- pdarray typing ---------------------------------------------------------
@@ -157,24 +175,14 @@ class PDArrayMethod(nb_types.Callable):
             pyapi = context.get_python_api(builder)
             gil_state = pyapi.gil_ensure()
 
-            # box the arguments: regular dispatch of self and 1 or more args
+            # box the arguments: regular dispatch of self and N args; the bound
+            # method holds a reference to self already, so none is set here
             boxctxt = nb_pyapi._BoxContext(context, builder, pyapi, None)
             pyself = box_pyobject(typ, val[0], boxctxt)
-            pyargs = tuple(pyargs_from_native(context, builder, self.sig.args[1:], args[1:]))
+            pyargs = pyargs_from_native(context, builder, self.sig.args[1:], args[1:])
 
-            # call the Python-side method
-            pda = pyapi.call_method(pyself, name, pyargs)
-
-            err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
-            pyapi.gil_release(gil_state)
-
-            with nb_cgu.if_unlikely(builder, err_occurred):
-                builder.ret(ir.Constant(ir_errcode, -1))
-
-            # return result as a void ptr
-            result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-            builder.store(pda, result)
-            return builder.load(result)
+            # call the Python-side method and return result as void ptr
+            return call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state)
 
         target_refresh()
 
@@ -415,6 +423,11 @@ def box_pyobject(typ, val, c):
     c.builder.store(val, ptr)
     return c.builder.load(ptr)
 
+def box_pyobject_with_ref(typ, val, c, pyapi):
+    boxed = box_pyobject(typ, val, c)
+    pyapi.incref(boxed)
+    return boxed
+
 
 def register_aspyobject_model(numba_type):
     nb_ext.register_model(numba_type)(CapsuleModel)
@@ -492,7 +505,8 @@ def create_generic_lowering(func, module="arkouda"):
         for iarg, arg in enumerate(rl_args):
             pyargb = from_native_with_ref(
                 context, builder, pyapi, sig.args[iarg], arg, env)
-            pyapi.incref(pyargb)  # tuple_setitem will steals a reference
+            # tuple_setitem will steal an additional reference
+            context.nrt.incref(builder, sig.args[iarg], arg)
             pyapi.tuple_setitem(pyargs, iarg, pyargb)
 
         pyf = pyapi.object_getattr_string(mod, func.__name__)
@@ -524,8 +538,8 @@ def create_generic_lowering(func, module="arkouda"):
             pyapi.decref(pyres)
         else:
             result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-            pyapi.incref(pyres)
             builder.store(pyres, result)
+
         return builder.load(result)
 
     return imp_generic_lowering
@@ -534,9 +548,11 @@ def create_generic_lowering(func, module="arkouda"):
 #
 # numeric/arithmetic operations on pdarray
 #
-def create_lowering_op(op, binop=True):
+def create_lowering_op(op, binop=True, inplace=False):
     def imp_op(context, builder, sig, args):
         pyapi = context.get_python_api(builder)
+        name = "__%s__" % op.__name__
+
         gil_state = pyapi.gil_ensure()
 
         # box the arguments
@@ -548,32 +564,23 @@ def create_lowering_op(op, binop=True):
             if not isinstance(sig.args[0], PDArrayType):
                 self_idx = 1; other_idx = 0
 
-            pyself = box_pyobject(sig.args[self_idx], args[self_idx], boxctxt)
+            pyself = box_pyobject_with_ref(sig.args[self_idx], args[self_idx], boxctxt, pyapi)
             if isinstance(sig.args[other_idx], PDArrayType):
-                pyargs = (box_pyobject(sig.args[other_idx], args[other_idx], boxctxt),)
+                pyargs = (box_pyobject_with_ref(sig.args[other_idx], args[other_idx], boxctxt, pyapi),)
             else:
                 env = context.get_env_manager(builder)
                 pyargs = (from_native_with_ref(
                     context, builder, pyapi, sig.args[other_idx], args[other_idx], env),)
         else:
-            # regular dispatch of self and 1 or more args
-            pyself = box_pyobject(sig.args[0], args[0], boxctxt)
+            # regular dispatch of self and 1 or more args; self needs a ref-count as
+            # it's taking from the argument tuple, not passed directly
+            pyself = box_pyobject_with_ref(sig.args[0], args[0], boxctxt, pyapi)
             pyargs = pyargs_from_native(context, builder, sig.args[1:], args[1:])
 
-        # call the Python-side method
-        pda = pyapi.call_method(pyself, "__%s__" % op.__name__, pyargs)
+        # call the Python-side method and return result as void ptr
+        result = call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state)
 
-        err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
-        pyapi.gil_release(gil_state)
-
-        with nb_cgu.if_unlikely(builder, err_occurred):
-            builder.ret(ir.Constant(ir_errcode, -1))
-
-        # return result as a void ptr
-        result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-        pyapi.incref(pda)
-        builder.store(pda, result)
-        return builder.load(result)
+        return result
 
     return imp_op
 
