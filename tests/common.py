@@ -2,6 +2,7 @@ from base_test import ArkoudaTest
 
 import arkouda as ak
 import arkjit
+import gc
 import inspect
 import numpy as np
 
@@ -26,6 +27,8 @@ class ArkoudaJITTest(ArkoudaTest):
             assert res0 == res1
 
     def compare(self, passes, forg, *args, **kwds):
+        mem_level = len(ak.list_symbol_table())
+
         self.reset_counters()
         res0 = forg(*args, **kwds)
         self.record_counters(forg, optimized=False)
@@ -36,11 +39,17 @@ class ArkoudaJITTest(ArkoudaTest):
         res1 = fopt(*args, **kwds)
         self.record_counters(forg, optimized=True)
 
-        if isinstance(res0, tuple):
+        if isinstance(res0, tuple) and res0:
             for r0, r1 in zip(res0, res1):
                 self._assert_equal(r0, r1)
+            del r0, r1
         else:
             self._assert_equal(res0, res1)
+
+        del res0, res1
+        gc.collect()
+
+        assert mem_level == len(ak.list_symbol_table())
 
     def setup_class(cls):
         ArkoudaJITTest._binop = ak.pdarray._binop
