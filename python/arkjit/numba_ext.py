@@ -37,6 +37,7 @@ ir_errcode = ir.IntType(32)
 
 ak_types = [nb_types.int64, nb_types.float64, nb_types.bool_]
 
+
 def target_refresh():
     """
     Update registries mid-compilation after having registered new lowering
@@ -46,12 +47,13 @@ def target_refresh():
     nb_reg.cpu_target.target_context.refresh()
 
 
-def type_remap(t: nb_types.Type) -> type:
-    if isinstance(t, nb_types.Integer):
-        return nb_types.Integer
-    if isinstance(t, nb_types.Float):
-        return nb_types.Float
+def _generalized_type(t: nb_types.Type) -> type:
+    if isinstance(t, (nb_types.Integer, nb_types.Float, PDArrayType)):
+        return type(t)
     return t
+
+def lower_args(args: tuple) -> tuple:
+    return tuple(_generalized_type(x) for x in args)
 
 
 class KeywordPlaceholder(nb_types.PyObject):
@@ -170,7 +172,7 @@ class PDArrayMethod(nb_types.Callable):
         self.sig = pda_signature(
             "method", return_type, args, kwds, func=self._func, recvr=pdarray_type)
 
-        @nb_iutils.lower_builtin((PDArrayType, self._func.__name__), pdarray_type, *args)
+        @nb_iutils.lower_builtin((PDArrayType, self._func.__name__), PDArrayType, lower_args(*args))
         def lower_method(context, builder, typ, val, name=self._func.__name__):
             pyapi = context.get_python_api(builder)
             gil_state = pyapi.gil_ensure()
@@ -234,11 +236,11 @@ class PDArrayOverloadTemplate(nb_tmpl.AbstractTemplate):
     def register_lowering(self, func: py_typing.Callable, args: py_typing.Tuple, lowering: py_typing.Callable) -> None:
         # register a creator lowering implementation for the given argument
         # types (which are assumed to be correct)
-        lower_args = tuple(type_remap(x) for x in args)
-        if lower_args not in self._lowered[func]:
-            decorate = nb_iutils.lower_builtin(func, *lower_args)
+        args = lower_args(args)
+        if args not in self._lowered[func]:
+            decorate = nb_iutils.lower_builtin(func, *args)
             decorate(lowering(func))
-            self._lowered[func].add(lower_args)
+            self._lowered[func].add(args)
             target_refresh()
 
 
@@ -593,22 +595,22 @@ for op in (operator.mul, operator.imul,
            operator.eq,  operator.ne,
            operator.lt,  operator.le,
            operator.gt,  operator.ge):
-    nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
+    nb_iutils.lower_builtin(op, PDArrayType, PDArrayType)(create_lowering_op(op))
     for x in ak_types:
-        nb_iutils.lower_builtin(op, pdarray_type, x)(create_lowering_op(op))
-        nb_iutils.lower_builtin(op, x, pdarray_type)(create_lowering_op(op))
+        nb_iutils.lower_builtin(op, PDArrayType, x)(create_lowering_op(op))
+        nb_iutils.lower_builtin(op, x, PDArrayType)(create_lowering_op(op))
 
 # comparison
 for op in (operator.eq, operator.ne):
-    nb_iutils.lower_builtin(op, pdarray_type, pdarray_type)(create_lowering_op(op))
+    nb_iutils.lower_builtin(op, PDArrayType, PDArrayType)(create_lowering_op(op))
 
 # indexing
 for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
-    nb_iutils.lower_builtin(operator.getitem, pdarray_type, idx_type)(
+    nb_iutils.lower_builtin(operator.getitem, PDArrayType, idx_type)(
         create_lowering_op(operator.getitem, binop=False))
 
     for x in ak_types + [pdarray_type]:
-        nb_iutils.lower_builtin(operator.setitem, pdarray_type, idx_type, x)(
+        nb_iutils.lower_builtin(operator.setitem, PDArrayType, idx_type, x)(
             create_lowering_op(operator.setitem, binop=False))
 
 
