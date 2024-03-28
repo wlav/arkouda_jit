@@ -91,8 +91,8 @@ def pyargs_from_native(context, builder, argtypes, argvalues):
     return tuple(pyargs)
 
 
-def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state):
-    pda = pyapi.call_method(pyself, name, pyargs)
+def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, rtype, gil_state):
+    pyres = pyapi.call_method(pyself, name, pyargs)
 
     err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
 
@@ -104,8 +104,20 @@ def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state):
     with nb_cgu.if_unlikely(builder, err_occurred):
         builder.ret(ir.Constant(ir_errcode, -1))
 
-    result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-    builder.store(pda, result)
+    if isinstance(rtype, nb_types.Float):
+        result = nb_cgu.alloca_once(builder, ir.DoubleType())
+        f = pyapi.float_as_double(pyres)
+        pyapi.decref(pyres)
+        builder.store(f, result)
+    elif isinstance(rtype, nb_types.Integer):
+        result = nb_cgu.alloca_once(builder, ir.IntType(64))
+        i = pyapi.long_as_longlong(pyres)
+        pyapi.decref(pyres)
+        builder.store(i, result)
+    else:
+        result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+        builder.store(pyres, result)
+
     return builder.load(result)
 
 
@@ -115,10 +127,15 @@ def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state):
 # fake type to shuttle arbitrary instances
 #
 class OpaquePyType(nb_types.Type):
-    known_types = set()
+    def __init__(self, hint=None) -> None:
+        try:
+            hname = hint.__name__
+        except AttributeError:
+            hname = str(hint)
 
-    def __init__(self) -> None:
-        super(OpaquePyType, self).__init__(name="OpaquePyObject")
+        super(OpaquePyType, self).__init__(name="OpaquePyObject_%s" % hname)
+
+        self.hint = hint
 
 opaque_py_type = OpaquePyType()
 
@@ -129,16 +146,38 @@ opaque_py_type = OpaquePyType()
 class PDArrayType(nb_types.Type):
     mutable = True       # ie. type is allowed to be lhs
 
-    def __init__(self) -> None:
-        super(PDArrayType, self).__init__(name="PDArray")
+    def __init__(self, dtype) -> None:
+        super(PDArrayType, self).__init__(name="PDArray_%s" % str(dtype))
 
-pdarray_type = register_type(ak.pdarrayclass.pdarray, PDArrayType())
+        self.dtype = dtype
+
+pdarray_f64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.float64))
+pdarray_i64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.int64))
+pdarray_b1  = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.bool_))
+pdarray_type = pdarray_f64   # default type
+
+def get_pdarray_type(dtype):
+    if dtype == ak.float64 or dtype == np.float64:
+        return pdarray_f64
+    elif dtype == ak.int64 or dtype == np.int64:
+        return pdarray_i64
+    elif dtype == ak.bool  or dtype == np.bool_:
+        return pdarray_b1
+    return pdarray_type
+
 
 # dtype comes from numpy, where it is a constant; we need it as a variable
 # type such that it can be passed as keyword arguments (this is necessary
-# b/c the main pdarray creation function requires kwds  and can not unfold)
+# b/c the main pdarray creation function requires kwds and can not unfold)
 # TODO: should probably reject dtypes not loaded from the arkouda module
-register_type(np.dtype, opaque_py_type)
+dtype_types = {}
+for dt in (np.float64, np.int64, np.bool_):
+    dtype_types[np.dtype(dt)] = OpaquePyType(dt)
+    dtype_types[dt] = dtype_types[np.dtype(dt)]
+
+@nb_ext.typeof_impl.register(np.dtype)
+def typeof_index(val, c) -> nb_types.Type:
+    return dtype_types[val]
 
 
 #
@@ -184,7 +223,8 @@ class PDArrayMethod(nb_types.Callable):
             pyargs = pyargs_from_native(context, builder, self.sig.args[1:], args[1:])
 
             # call the Python-side method and return result as void ptr
-            return call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state)
+            return call_method_with_cleanup(
+                builder, pyapi, pyself, name, pyargs, typ, gil_state)
 
         target_refresh()
 
@@ -307,7 +347,15 @@ def create_creator_overload(func: py_typing.Callable) -> None:
             typed_args = self.typeof_args(func, args, kwds)
             self.register_lowering(func, typed_args, create_generic_lowering)
 
-            return pda_signature("constructor", pdarray_type, typed_args, kwds, func=func, recvr=None)
+            return_type = pdarray_type
+            try:
+                dtype = kwds['dtype']
+                if isinstance(dtype, OpaquePyType):
+                    return_type = get_pdarray_type(dtype.hint)
+            except KeyError:
+                pass
+
+            return pda_signature("constructor", return_type, typed_args, kwds, func=func, recvr=None)
 
     decorate = nb_tmpl.infer_global(func)
     decorate(PDArrayCreate)
@@ -399,9 +447,9 @@ class PDArrayGetItem(nb_tmpl.AbstractTemplate):
         arr_type, idx_type = args
         if isinstance(arr_type, PDArrayType):
             if isinstance(idx_type, nb_types.Integer):
-                return pda_signature("getitem", opaque_py_type, (arr_type, idx_type))
+                return pda_signature("getitem", arr_type.dtype, (arr_type, idx_type))
             elif isinstance(idx_type, (PDArrayType, nb_types.SliceType)):
-                return pda_signature("getitem", pdarray_type, (arr_type, idx_type))
+                return pda_signature("getitem", arr_type, (arr_type, idx_type))
 
 @nb_tmpl.infer_global(operator.setitem)
 class PDArraySetItem(nb_tmpl.AbstractTemplate):
@@ -580,7 +628,8 @@ def create_lowering_op(op, binop=True, inplace=False):
             pyargs = pyargs_from_native(context, builder, sig.args[1:], args[1:])
 
         # call the Python-side method and return result as void ptr
-        result = call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, gil_state)
+        result = call_method_with_cleanup(
+            builder, pyapi, pyself, name, pyargs, sig.return_type, gil_state)
 
         return result
 

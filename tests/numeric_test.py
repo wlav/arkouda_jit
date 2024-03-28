@@ -158,13 +158,13 @@ class NumericTests(ArkoudaJITTest):
 
         def calc1():
             a1 = ak.arange(1, 10)
-            a2 = ak.ones(9, dtype=np.int64)
-            cond = a1 < 5
+            a2 = ak.ones(9, dtype=np.int64)      # should be ak.int64, but `ones()` accepts either, so
+            cond = a1 < 5                        # leave in place to stress the JIT
             return ak.where(cond, a1, a2)
 
         def calc2():
             a1 = ak.arange(1,10)
-            a2 = ak.ones(9, dtype=np.int64)
+            a2 = ak.ones(9, dtype=np.int64)      # id.
             cond = a1 == 5
             return ak.where(cond, a1, a2)
 
