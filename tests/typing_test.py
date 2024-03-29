@@ -11,7 +11,7 @@ class TypingTests(ArkoudaJITTest):
     def test_constructors(self):
         """Verify dtype typing"""
 
-        def calc_f64():       # float64
+        def calc_f64():      # float64
             A = ak.zeros(5)
             A[3] = 42.
             c = A[3]
@@ -29,3 +29,21 @@ class TypingTests(ArkoudaJITTest):
                          (calc_i64, np.int64)):
             c = f()
             assert type(c) == rtype
+
+    def test_numeric(self):
+        """Verify return types of numering operations"""
+
+        def calc1():         # float64
+            s = 0
+            s += ak.sum(ak.arange(5))
+            return s
+
+        def calc2():
+            s = 0
+            s += ak.sum(ak.arange(5, dtype=ak.int64))
+            return s
+
+        assert self.verify(locals())
+
+        s = calc1()
+        assert type(s) == np.int64

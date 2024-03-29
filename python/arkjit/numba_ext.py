@@ -35,7 +35,13 @@ ir_voidptr = ir.PointerType(ir_byte)  # by convention
 ir_byteptr = ir_voidptr  # for clarity
 ir_errcode = ir.IntType(32)
 
-ak_types = [nb_types.int64, nb_types.float64, nb_types.bool_]
+ak_types = {
+    np.float64:   nb_types.float64,
+    np.int64:     nb_types.int64,
+    np.bool_:     nb_types.bool_,
+}
+
+ak_annotated_types = tuple(ak_types.keys()) + tuple('np.'+t.__name__ for t in ak_types.keys())
 
 
 def target_refresh():
@@ -91,6 +97,37 @@ def pyargs_from_native(context, builder, argtypes, argvalues):
     return tuple(pyargs)
 
 
+def load_result(builder, pyapi, pyres, rtype):
+    # return result as actual type, an unrolled tuple for multiple returns,
+    # or a PyObject* (for pdarray's and opaque objects)
+    if isinstance(rtype, nb_types.Float):
+        result = nb_cgu.alloca_once(builder, ir.DoubleType())
+        f = pyapi.float_as_double(pyres)
+        pyapi.decref(pyres)
+        builder.store(f, result)
+    elif isinstance(rtype, nb_types.Integer):
+        result = nb_cgu.alloca_once(builder, ir.IntType(64))
+        i = pyapi.long_as_longlong(pyres)
+        pyapi.decref(pyres)
+        builder.store(i, result)
+    elif isinstance(rtype, nb_types.Tuple):
+        size = sig.return_type.count
+        pack = ir.LiteralStructType([pyapi.pyobj]*size)
+        result = nb_cgu.alloca_once(builder, pack)
+        unrolled = list()
+        for i in range(size):
+            v = pyapi.tuple_getitem(pyres, i)
+            pyapi.incref(v)   # v is borrowed
+            unrolled.append(v)
+        builder.store(nb_cgu.make_anonymous_struct(builder, unrolled), result)
+        pyapi.decref(pyres)
+    else:
+        result = nb_cgu.alloca_once(builder, pyapi.pyobj)
+        builder.store(pyres, result)
+
+    return builder.load(result)
+
+
 def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, rtype, gil_state):
     pyres = pyapi.call_method(pyself, name, pyargs)
 
@@ -104,21 +141,7 @@ def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, rtype, gil_st
     with nb_cgu.if_unlikely(builder, err_occurred):
         builder.ret(ir.Constant(ir_errcode, -1))
 
-    if isinstance(rtype, nb_types.Float):
-        result = nb_cgu.alloca_once(builder, ir.DoubleType())
-        f = pyapi.float_as_double(pyres)
-        pyapi.decref(pyres)
-        builder.store(f, result)
-    elif isinstance(rtype, nb_types.Integer):
-        result = nb_cgu.alloca_once(builder, ir.IntType(64))
-        i = pyapi.long_as_longlong(pyres)
-        pyapi.decref(pyres)
-        builder.store(i, result)
-    else:
-        result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-        builder.store(pyres, result)
-
-    return builder.load(result)
+    return load_result(builder, pyapi, pyres, rtype)
 
 
 # -- pdarray typing ---------------------------------------------------------
@@ -154,6 +177,7 @@ class PDArrayType(nb_types.Type):
 pdarray_f64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.float64))
 pdarray_i64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.int64))
 pdarray_b1  = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.bool_))
+assert len(ak_types) == 3    # add pdarray types if more added to ak_types
 pdarray_type = pdarray_f64   # default type
 
 def get_pdarray_type(dtype):
@@ -170,14 +194,21 @@ def get_pdarray_type(dtype):
 # type such that it can be passed as keyword arguments (this is necessary
 # b/c the main pdarray creation function requires kwds and can not unfold)
 # TODO: should probably reject dtypes not loaded from the arkouda module
-dtype_types = {}
+def annotation2nbtype(dtype):
+    if isinstance(dtype, np.dtype):
+        dtype = dtype.type
+    if isinstance(dtype, str):
+        dtype = eval(dtype)
+    return ak_types[dtype]
+
+dtype_opaque_types = {}
 for dt in (np.float64, np.int64, np.bool_):
-    dtype_types[np.dtype(dt)] = OpaquePyType(dt)
-    dtype_types[dt] = dtype_types[np.dtype(dt)]
+    dtype_opaque_types[np.dtype(dt)] = OpaquePyType(dt)
+    dtype_opaque_types[dt] = dtype_opaque_types[np.dtype(dt)]
 
 @nb_ext.typeof_impl.register(np.dtype)
-def typeof_index(val, c) -> nb_types.Type:
-    return dtype_types[val]
+def typeof_dtype(val, c) -> nb_types.Type:
+    return dtype_opaque_types[val]
 
 
 #
@@ -383,6 +414,8 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
             return_type = None
             if pysig.return_annotation in ('pdarray', ak.pdarray):
                 return_type = pdarray_type
+            elif pysig.return_annotation in ak_annotated_types:
+                return_type = annotation2nbtype(pysig.return_annotation)
             elif py_typing.get_origin(pysig.return_annotation) == tuple:
                 rtargs = list()
                 for a in py_typing.get_args(pysig.return_annotation):
@@ -414,8 +447,8 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
 #
 class PDArrayBinOp(nb_tmpl.ConcreteTemplate):
     cases = [pda_signature("binop", pdarray_type, (pdarray_type, pdarray_type))] + \
-        [pda_signature("binop", pdarray_type, (pdarray_type, x)) for x in ak_types] + \
-        [pda_signature("binop", pdarray_type, (x, pdarray_type)) for x in ak_types]
+        [pda_signature("binop", pdarray_type, (pdarray_type, x)) for x in ak_types.values()] + \
+        [pda_signature("binop", pdarray_type, (x, pdarray_type)) for x in ak_types.values()]
 
 def _binop_type(op):
     kls = type('PDArrayBinOp'+op.__name__.upper(),
@@ -574,23 +607,7 @@ def create_generic_lowering(func, module="arkouda"):
         with nb_cgu.if_unlikely(builder, err_occurred):
             builder.ret(ir.Constant(ir_errcode, -1))
 
-        # return result as a PyObject* or an unrolled tuple for multiple returns
-        if isinstance(sig.return_type, nb_types.Tuple):
-            size = sig.return_type.count
-            pack = ir.LiteralStructType([pyapi.pyobj]*size)
-            result = nb_cgu.alloca_once(builder, pack)
-            unrolled = list()
-            for i in range(size):
-                v = pyapi.tuple_getitem(pyres, i)
-                pyapi.incref(v)   # v is borrowed
-                unrolled.append(v)
-            builder.store(nb_cgu.make_anonymous_struct(builder, unrolled), result)
-            pyapi.decref(pyres)
-        else:
-            result = nb_cgu.alloca_once(builder, pyapi.pyobj)
-            builder.store(pyres, result)
-
-        return builder.load(result)
+        return load_result(builder, pyapi, pyres, sig.return_type)
 
     return imp_generic_lowering
 
@@ -645,7 +662,7 @@ for op in (operator.mul, operator.imul,
            operator.lt,  operator.le,
            operator.gt,  operator.ge):
     nb_iutils.lower_builtin(op, PDArrayType, PDArrayType)(create_lowering_op(op))
-    for x in ak_types:
+    for x in ak_types.values():
         nb_iutils.lower_builtin(op, PDArrayType, x)(create_lowering_op(op))
         nb_iutils.lower_builtin(op, x, PDArrayType)(create_lowering_op(op))
 
@@ -658,7 +675,7 @@ for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
     nb_iutils.lower_builtin(operator.getitem, PDArrayType, idx_type)(
         create_lowering_op(operator.getitem, binop=False))
 
-    for x in ak_types + [pdarray_type]:
+    for x in list(ak_types.values()) + [pdarray_type]:
         nb_iutils.lower_builtin(operator.setitem, PDArrayType, idx_type, x)(
             create_lowering_op(operator.setitem, binop=False))
 
