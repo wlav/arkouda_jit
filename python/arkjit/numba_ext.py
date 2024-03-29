@@ -30,7 +30,9 @@ __all__ = [
 
 
 # -- helpers ----------------------------------------------------------------
+ir_bool = ir.IntType(8)
 ir_byte = ir.IntType(8)
+ir_i64  = ir.IntType(64)
 ir_voidptr = ir.PointerType(ir_byte)  # by convention
 ir_byteptr = ir_voidptr  # for clarity
 ir_errcode = ir.IntType(32)
@@ -97,19 +99,26 @@ def pyargs_from_native(context, builder, argtypes, argvalues):
     return tuple(pyargs)
 
 
-def load_result(builder, pyapi, pyres, rtype):
+def load_result(context, builder, pyres, rtype):
     # return result as actual type, an unrolled tuple for multiple returns,
     # or a PyObject* (for pdarray's and opaque objects)
+    pyapi = context.get_python_api(builder)
+
     if isinstance(rtype, nb_types.Float):
         result = nb_cgu.alloca_once(builder, ir.DoubleType())
         f = pyapi.float_as_double(pyres)
         pyapi.decref(pyres)
         builder.store(f, result)
     elif isinstance(rtype, nb_types.Integer):
-        result = nb_cgu.alloca_once(builder, ir.IntType(64))
+        result = nb_cgu.alloca_once(builder, ir_i64)
         i = pyapi.long_as_longlong(pyres)
         pyapi.decref(pyres)
         builder.store(i, result)
+    elif isinstance(rtype, nb_types.Boolean):
+        result = nb_cgu.alloca_once(builder, ir_bool)
+        b32 = pyapi.object_istrue(pyres)
+        pyapi.decref(pyres)
+        builder.store(builder.trunc(b32, ir_bool), result)
     elif isinstance(rtype, nb_types.Tuple):
         size = sig.return_type.count
         pack = ir.LiteralStructType([pyapi.pyobj]*size)
@@ -128,7 +137,8 @@ def load_result(builder, pyapi, pyres, rtype):
     return builder.load(result)
 
 
-def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, rtype, gil_state):
+def call_method_with_cleanup(context, builder, pyself, name, pyargs, rtype, gil_state):
+    pyapi = context.get_python_api(builder)
     pyres = pyapi.call_method(pyself, name, pyargs)
 
     err_occurred = nb_cgu.is_not_null(builder, pyapi.err_occurred())
@@ -141,7 +151,7 @@ def call_method_with_cleanup(builder, pyapi, pyself, name, pyargs, rtype, gil_st
     with nb_cgu.if_unlikely(builder, err_occurred):
         builder.ret(ir.Constant(ir_errcode, -1))
 
-    return load_result(builder, pyapi, pyres, rtype)
+    return load_result(context, builder, pyres, rtype)
 
 
 # -- pdarray typing ---------------------------------------------------------
@@ -255,7 +265,7 @@ class PDArrayMethod(nb_types.Callable):
 
             # call the Python-side method and return result as void ptr
             return call_method_with_cleanup(
-                builder, pyapi, pyself, name, pyargs, typ, gil_state)
+                context, builder, pyself, name, pyargs, typ, gil_state)
 
         target_refresh()
 
@@ -607,7 +617,7 @@ def create_generic_lowering(func, module="arkouda"):
         with nb_cgu.if_unlikely(builder, err_occurred):
             builder.ret(ir.Constant(ir_errcode, -1))
 
-        return load_result(builder, pyapi, pyres, sig.return_type)
+        return load_result(context, builder, pyres, sig.return_type)
 
     return imp_generic_lowering
 
@@ -646,7 +656,7 @@ def create_lowering_op(op, binop=True, inplace=False):
 
         # call the Python-side method and return result as void ptr
         result = call_method_with_cleanup(
-            builder, pyapi, pyself, name, pyargs, sig.return_type, gil_state)
+            context, builder, pyself, name, pyargs, sig.return_type, gil_state)
 
         return result
 
