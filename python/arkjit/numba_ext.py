@@ -731,8 +731,17 @@ class PDArrayFieldResolver(nb_tmpl.AttributeTemplate):
 #
 # pdarray creation
 #
+def _getf(mod, _fn):
+    try:
+        # some functions have a legacy version, so try on the arkouda
+        # module first, in case the configuration has an override
+        _f = getattr(ak, _fn)
+    except AttributeError:
+        _f = getattr(mod, _fn)
+    return _f
+
 for _fn in akcreate.__all__:
-    _f = getattr(akcreate, _fn)
+    _f = _getf(akcreate, _fn)
     if callable(_f):
         create_creator_overload(_f)
 
@@ -741,7 +750,7 @@ for _fn in akcreate.__all__:
 #
 for mod in [akclass, aknum, aksetops]:
     for _fn in mod.__all__:
-        _f = getattr(mod, _fn)
+        _f = _getf(mod, _fn)
         if callable(_f):
             create_annotated_overload(_f)
 
@@ -750,6 +759,6 @@ for mod in [akclass, aknum, aksetops]:
 #
 for mod in [aksorting]:
     for _fn in mod.__all__:
-        _f = getattr(mod, _fn)
+        _f = _getf(mod, _fn)
         if callable(_f):
             create_annotated_overload(_f)
