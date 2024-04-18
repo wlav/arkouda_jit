@@ -171,6 +171,20 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                         elif expr.op == "getattr":
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
+                        elif expr.op == "static_getitem":
+                            # getitem call on containers of PDArray's (PDArray indexing that results
+                            # in a PDArray, e.g. slicing, is handled explicitly already)
+                            val = state.typemap.get(expr.value.name, None)
+                            ret = state.typemap.get(instr.target.name, None)
+                            if not isinstance(val, PDArrayType) and isinstance(ret, PDArrayType):
+                                ref_target = nb_ir.Var(instr.target.scope, instr.target.name+'.ref', instr.loc)
+                                state.typemap[ref_target.name] = ret
+                                newbody.append(instr)
+                                newbody.append(nb_ir.Assign(instr.target, ref_target, instr.loc))
+                                newbody.append(IncRef(ref_target.name, instr.loc))
+                                # ref_target is never decref'ed: the original target will be
+                                modified = True
+                                continue    # special case as instr already added to newbody above
                         elif expr.op == "build_list" or expr.op == "build_tuple":
                             to_defer = list()
                             for item in expr.items:
