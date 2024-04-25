@@ -50,3 +50,15 @@ class MemoryTests(ArkoudaJITTest):
 
         assert self.verify(locals())
 
+    def test_append(self):
+        """Memory access control of list.append"""
+
+        def calc():
+            A = ak.arange(0, 10, 1)
+            B = ak.arange(0, 10, 1)
+            l = list()
+            l.append(A)
+            l.append(B)
+            return l
+
+        assert self.verify(locals())

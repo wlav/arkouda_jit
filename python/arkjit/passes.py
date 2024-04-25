@@ -171,6 +171,17 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                         elif expr.op == "getattr":
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
+                        elif expr.op == "call":
+                            vars = expr.list_vars()
+                            callee = state.typemap.get(vars[0].name, None)
+                            if isinstance(callee, nb_types.BoundFunction) and\
+                                    callee.key[0] == 'list.append':
+                                to_defer = list()
+                                for v in vars[1:]:
+                                    if self._incref(v.name, instr, state, newbody):
+                                        modified = True
+                                if to_defer:
+                                    deferred[instr.target.name] = to_defer
                         elif expr.op == "static_getitem":
                             # getitem call on containers of PDArray's (PDArray indexing that results
                             # in a PDArray, e.g. slicing, is handled explicitly already)
