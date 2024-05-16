@@ -10,7 +10,7 @@ requirements = []
 setup_requirements = ['wheel']
 
 here = os.path.abspath(os.path.dirname(__file__))
-with codecs.open(os.path.join(here, 'README.rst'), encoding='utf-8') as f:
+with codecs.open(os.path.join(here, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 # https://packaging.python.org/guides/single-sourcing-package-version/
@@ -29,7 +29,7 @@ def find_version(*file_paths):
 
 setup(
     name='arkjit',
-    version=find_version('python', 'arkjit', '_version.py'),
+    version=find_version('client', 'arkjit', '_version.py'),
     description='Numba-based JIT for Arkouda',
     long_description=long_description,
 
@@ -59,7 +59,7 @@ setup(
 
     keywords='HPC workflow exploratory analysis parallel distribute arrays Chapel',
 
-    package_dir={'': 'python'},
+    package_dir={'': 'client'},
     packages=find_packages('python', include=add_pkg),
 
     zip_safe=False,
