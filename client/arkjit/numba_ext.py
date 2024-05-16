@@ -79,8 +79,12 @@ def register_type(pytype, identifier):
 def from_native_with_ref(c, b, pyapi, ty, v, env):
     # from_native_value steals a reference from the original ll value, the
     # numba-runtime incref adds one C-side
-    c.nrt.incref(b, ty, v)
-    return pyapi.from_native_value(ty, v, env)
+    pyarg = pyapi.from_native_value(ty, v, env)
+    if isinstance(ty, PDArrayType):
+        pyapi.incref(pyarg)
+    else:
+        c.nrt.incref(b, ty, v)
+    return pyarg
 
 
 def pyargs_from_native(context, builder, argtypes, argvalues):

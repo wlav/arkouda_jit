@@ -42,11 +42,16 @@ class MemoryTests(ArkoudaJITTest):
     def test_getitem(self):
         """Memory access control of elements indexed from a container"""
 
-        def calc():
+        def calc1():
             t1 = [ak.arange(10)]
             t2 = [ak.arange(10)]
             t = t1[0]*t2[0]
             return t
+
+        def calc2():
+            k = [ak.arange(0, 10, 1)]
+            ak.sum(k[0])
+            return k
 
         assert self.verify(locals())
 
