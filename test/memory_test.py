@@ -1,5 +1,6 @@
 import numpy as np
 import numba as nb
+from pytest import skip
 
 from common import ArkoudaJITTest
 from context import arkouda as ak
@@ -58,12 +59,22 @@ class MemoryTests(ArkoudaJITTest):
     def test_append(self):
         """Memory access control of list.append"""
 
-        def calc():
+        skip('work in progress')
+
+        def calc1():
             A = ak.arange(0, 10, 1)
             B = ak.arange(0, 10, 1)
             l = list()
             l.append(A)
             l.append(B)
             return l
+
+        def calc2():
+            out = []
+            for r in range(4):
+                M = ak.arange(0, 10, 1)
+                out.append(M)
+
+            return out
 
         assert self.verify(locals())

@@ -1,6 +1,7 @@
 """ Arkouda-specific passes for Numba
 """
 
+import collections
 import types as pytypes
 
 import numba.core.compiler_machinery as nb_cpl
@@ -9,13 +10,18 @@ import numba.core.ir_utils as nb_iru
 import numba.core.lowering as nb_lower
 import numba.core.typed_passes as nb_typed_pass
 import numba.core.types as nb_types
+import numba.core.typing as nb_typing
 import numba.parfors.parfor_lowering as nb_parfor_lower
 
 from llvmlite import ir
 
 from .numba_ext import (PDArrayType,
+                        pdarray_f64,
                         PDArrayBinOpSignature,
                         )
+from .runtime import (cleanup_container,
+                      cleanup_type,
+                      )
 
 __all__ = [
     "ArkoudaFunctionPass",
@@ -134,9 +140,10 @@ class ArkoudaDel(nb_cpl.LoweringPass):
 
         modified = False
 
+        pda_containers = dict()
         for block in state.func_ir.blocks.values():
             newbody = list()
-            deferred = dict()
+            deferred = collections.defaultdict(list)
             for instr in block.body:
                 if isinstance(instr, nb_ir.Del):
                     ref = instr.value
@@ -144,12 +151,37 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                     if isinstance(arg, PDArrayType):
                         newbody.append(DecRef(ref, instr.loc))
                         modified = True
-                    elif instr.value in deferred:
-                        for defer in reversed(deferred[instr.value]):
-                            newbody.append(DecRef(defer, instr.loc))
-                        del deferred[instr.value]
-                        newbody.append(instr)
                     else:
+                        if ref in deferred:
+                            for defer in reversed(deferred[ref]):
+                                newbody.append(DecRef(defer, instr.loc))
+                            del deferred[ref]
+                            modified = True
+                        elif ref in pda_containers:
+                            # loop over the container and decref all elements
+
+                            # container value and type
+                            cont, tc = pda_containers[ref]
+
+                            # load the container cleanup function
+                            cleanup = nb_ir.Var(block.scope, ref+'.cleanup', instr.loc)
+                            state.typemap[cleanup.name] = cleanup_type(state.typingctx, tc)
+                            newbody.append(
+                                nb_ir.Assign(
+                                    nb_ir.Global(cleanup.name, cleanup_container, instr.loc),
+                                    cleanup, instr.loc
+                                ))
+
+                            # decref all elements of the container
+                            res = nb_ir.Var(block.scope, ref+'.cleanup_ok', instr.loc)
+                            state.typemap[res.name] = nb_types.bool_
+                            e = nb_ir.Expr.call(cleanup, (cont,), {}, instr.loc)
+                            state.calltypes[e] = nb_typing.signature(nb_types.bool_, tc)
+                            newbody.append(nb_ir.Assign(e, res, instr.loc))
+
+                            del pda_containers[ref]
+                            modified = True
+
                         newbody.append(instr)
 
                 elif isinstance(instr, nb_ir.Assign):
@@ -169,19 +201,22 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 except KeyError:
                                     pass
                         elif expr.op == "getattr":
+                            arg = state.typemap.get(expr.value.name, None)
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
+                            else:
+                                # capture bound container type functions
+                                arg = state.typemap.get(expr.value.name, None)
+                                if isinstance(arg, (nb_types.List, nb_types.Tuple)) and\
+                                        expr.attr in ('append',):
+                                    pda_containers[expr.value.name] = (expr.value, arg)
                         elif expr.op == "call":
-                            vars = expr.list_vars()
-                            callee = state.typemap.get(vars[0].name, None)
+                            callee = state.typemap.get(expr.func.name, None)
                             if isinstance(callee, nb_types.BoundFunction) and\
                                     callee.key[0] == 'list.append':
-                                to_defer = list()
-                                for v in vars[1:]:
-                                    if self._incref(v.name, instr, state, newbody):
-                                        modified = True
-                                if to_defer:
-                                    deferred[instr.target.name] = to_defer
+                                vars = expr.list_vars()
+                                if self._incref(vars[1].name, instr, state, newbody):
+                                    modified = True
                         elif expr.op == "static_getitem":
                             # getitem call on containers of PDArray's (PDArray indexing that results
                             # in a PDArray, e.g. slicing, is handled explicitly already)
@@ -203,7 +238,7 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                     to_defer.append(item.name)
                                     modified = True
                             if to_defer:
-                                deferred[instr.target.name] = to_defer
+                                deferred[instr.target.name] += to_defer
 
                     elif isinstance(expr, nb_ir.Var):
                         if self._incref(expr.name, instr, state, newbody):
