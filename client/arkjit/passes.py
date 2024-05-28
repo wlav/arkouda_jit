@@ -136,7 +136,9 @@ class ArkoudaDel(nb_cpl.LoweringPass):
         return False
 
     def _is_pda_container(self, val):
-        return isinstance(val, (nb_types.List, nb_types.Tuple)) and isinstance(val.dtype, PDArrayType)
+        if isinstance(val, (nb_types.List, nb_types.Tuple, nb_types.UniTuple)):
+            return isinstance(val.dtype, PDArrayType)
+        return False
 
     def run_pass(self, state):
         print("Arkouda explicit deletion pass")
@@ -146,45 +148,39 @@ class ArkoudaDel(nb_cpl.LoweringPass):
         pda_containers = dict()
         for block in state.func_ir.blocks.values():
             newbody = list()
-            deferred = collections.defaultdict(list)
             for instr in block.body:
                 if isinstance(instr, nb_ir.Del):
                     ref = instr.value
-                    arg = state.typemap.get(ref, None)
-                    if isinstance(arg, PDArrayType):
+                    typ = state.typemap.get(ref, None)
+                    if isinstance(typ, PDArrayType):
                         newbody.append(DecRef(ref, instr.loc))
                         modified = True
+                    elif ref in pda_containers:
+                        # loop over the container and decref all elements
+
+                        # container variable
+                        cont, tc = pda_containers[ref]
+
+                        # load the container cleanup function
+                        cleanup = nb_ir.Var(block.scope, ref+'.cleanup', instr.loc)
+                        state.typemap[cleanup.name] = cleanup_type(state.typingctx, tc)
+                        newbody.append(
+                            nb_ir.Assign(
+                                nb_ir.Global(cleanup.name, cleanup_container, instr.loc),
+                                cleanup, instr.loc
+                            ))
+
+                        # decref all elements of the container
+                        res = nb_ir.Var(block.scope, ref+'.cleanup_ok', instr.loc)
+                        state.typemap[res.name] = nb_types.bool_
+                        e = nb_ir.Expr.call(cleanup, (cont,), {}, instr.loc)
+                        state.calltypes[e] = nb_typing.signature(nb_types.bool_, tc)
+                        newbody.append(nb_ir.Assign(e, res, instr.loc))
+
+                        del pda_containers[ref]
+                        newbody.append(instr)
+                        modified = True
                     else:
-                        if ref in deferred:
-                            for defer in reversed(deferred[ref]):
-                                newbody.append(DecRef(defer, instr.loc))
-                            del deferred[ref]
-                            modified = True
-                        elif ref in pda_containers:
-                            # loop over the container and decref all elements
-
-                            # container value and type
-                            cont, tc = pda_containers[ref]
-
-                            # load the container cleanup function
-                            cleanup = nb_ir.Var(block.scope, ref+'.cleanup', instr.loc)
-                            state.typemap[cleanup.name] = cleanup_type(state.typingctx, tc)
-                            newbody.append(
-                                nb_ir.Assign(
-                                    nb_ir.Global(cleanup.name, cleanup_container, instr.loc),
-                                    cleanup, instr.loc
-                                ))
-
-                            # decref all elements of the container
-                            res = nb_ir.Var(block.scope, ref+'.cleanup_ok', instr.loc)
-                            state.typemap[res.name] = nb_types.bool_
-                            e = nb_ir.Expr.call(cleanup, (cont,), {}, instr.loc)
-                            state.calltypes[e] = nb_typing.signature(nb_types.bool_, tc)
-                            newbody.append(nb_ir.Assign(e, res, instr.loc))
-
-                            del pda_containers[ref]
-                            modified = True
-
                         newbody.append(instr)
 
                 elif isinstance(instr, nb_ir.Assign):
@@ -205,14 +201,13 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 except KeyError:
                                     pass
                         elif expr.op == "getattr":
-                            arg = state.typemap.get(expr.value.name, None)
+                            typ = state.typemap.get(expr.value.name, None)
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
                             else:
                                 # capture bound container type functions
-                                arg = state.typemap.get(expr.value.name, None)
-                                if self._is_pda_container(arg) and expr.attr in ('append',):
-                                    pda_containers[expr.value.name] = (expr.value, arg)
+                                if self._is_pda_container(typ) and expr.attr in ('append',):
+                                    pda_containers[expr.value.name] = (expr.value, typ)
                         elif expr.op == "call":
                             callee = state.typemap.get(expr.func.name, None)
                             if isinstance(callee, nb_types.BoundFunction) and\
@@ -235,13 +230,12 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 modified = True
                                 continue    # special case as instr already added to newbody above
                         elif expr.op == "build_list" or expr.op == "build_tuple":
-                            to_defer = list()
-                            for item in expr.items:
-                                if self._incref(item.name, instr, state, newbody):
-                                    to_defer.append(item.name)
-                                    modified = True
-                            if to_defer:
-                                deferred[instr.target.name] += to_defer
+                            typ = state.typemap.get(instr.target.name, None)
+                            if self._is_pda_container(typ):
+                                for item in expr.items:
+                                    if self._incref(item.name, instr, state, newbody):
+                                        modified = True
+                                pda_containers[instr.target.name] = (instr.target, typ)
 
                     elif isinstance(expr, nb_ir.Var):
                         if self._incref(expr.name, instr, state, newbody):
