@@ -215,7 +215,11 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 vars = expr.list_vars()
                                 if self._incref(vars[1].name, instr, state, newbody):
                                     modified = True
-                        elif expr.op == "static_getitem":
+                            else:
+                                typ = state.typemap.get(instr.target.name, None)
+                                if self._is_pda_container(typ):
+                                    pda_containers[instr.target.name] = (instr.target, typ)
+                        elif expr.op in ("static_getitem", "getitem"):
                             # getitem call on containers of PDArray's (PDArray indexing that results
                             # in a PDArray, e.g. slicing, is handled explicitly already)
                             val = state.typemap.get(expr.value.name, None)
