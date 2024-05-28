@@ -135,6 +135,9 @@ class ArkoudaDel(nb_cpl.LoweringPass):
             return True
         return False
 
+    def _is_pda_container(self, val):
+        return isinstance(val, (nb_types.List, nb_types.Tuple)) and isinstance(val.dtype, PDArrayType)
+
     def run_pass(self, state):
         print("Arkouda explicit deletion pass")
 
@@ -197,7 +200,8 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 modified = True
                             else:      # not a pdarray, but may be a container
                                 try:
-                                    del deferred[expr.value.name]
+                                    # prevent deletion of the elements
+                                    del pda_containers[expr.value.name]
                                 except KeyError:
                                     pass
                         elif expr.op == "getattr":
@@ -207,8 +211,7 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                             else:
                                 # capture bound container type functions
                                 arg = state.typemap.get(expr.value.name, None)
-                                if isinstance(arg, (nb_types.List, nb_types.Tuple)) and\
-                                        expr.attr in ('append',):
+                                if self._is_pda_container(arg) and expr.attr in ('append',):
                                     pda_containers[expr.value.name] = (expr.value, arg)
                         elif expr.op == "call":
                             callee = state.typemap.get(expr.func.name, None)
