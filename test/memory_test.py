@@ -59,8 +59,6 @@ class MemoryTests(ArkoudaJITTest):
     def test_append(self):
         """Memory access control of list.append"""
 
-        skip('work in progress')
-
         def calc1():
             A = ak.arange(0, 10, 1)
             B = ak.arange(0, 10, 1)
@@ -74,6 +72,21 @@ class MemoryTests(ArkoudaJITTest):
             for r in range(4):
                 M = ak.arange(0, 10, 1)
                 out.append(M)
+
+            return None
+
+        def calc3():
+            out = []
+            for r in range(4):
+                M = ak.arange(0, 10, 1)
+                out.append(M)
+
+            return out
+
+        def calc4():         # cross-check
+            out = []
+            for r in range(4):
+                out.append(r)
 
             return out
 
