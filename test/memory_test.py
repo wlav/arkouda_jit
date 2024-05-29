@@ -1,6 +1,6 @@
+import arkjit
 import numpy as np
 import numba as nb
-from pytest import skip
 
 from common import ArkoudaJITTest
 from context import arkouda as ak
@@ -91,3 +91,38 @@ class MemoryTests(ArkoudaJITTest):
             return out
 
         assert self.verify(locals())
+
+    def test_aliasing(self):
+        """Memory control of aliased containers"""
+
+        @arkjit.optimize()
+        def prep1():
+            out = []
+            for r in range(4):
+                M = ak.arange(0, 10, 1)
+                out.append(M)
+            return out
+
+        @arkjit.optimize(inline='never')
+        def prep2():
+            out = []
+            for r in range(4):
+                M = ak.arange(0, 10, 1)
+                out.append(M)
+            return out
+
+        def calc1():
+            out = prep1()
+            s = 0
+            for i in range(len(out)):
+                s += ak.sum(out[i])
+            return s
+
+        def calc2():
+            out = prep2()
+            s = 0
+            for i in range(len(out)):
+                s += ak.sum(out[i])
+            return s
+
+        assert self.verify((calc1, calc2))

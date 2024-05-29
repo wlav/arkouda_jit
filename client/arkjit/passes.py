@@ -135,9 +135,9 @@ class ArkoudaDel(nb_cpl.LoweringPass):
             return True
         return False
 
-    def _is_pda_container(self, val):
-        if isinstance(val, (nb_types.List, nb_types.Tuple, nb_types.UniTuple)):
-            return isinstance(val.dtype, PDArrayType)
+    def _is_pda_container(self, typ):
+        if isinstance(typ, (nb_types.List, nb_types.Tuple, nb_types.UniTuple)):
+            return isinstance(typ.dtype, PDArrayType)
         return False
 
     def run_pass(self, state):
@@ -145,8 +145,12 @@ class ArkoudaDel(nb_cpl.LoweringPass):
 
         modified = False
 
+        # aliasing resolution order depends on block order
+        labels = sorted(state.func_ir.blocks.keys())
+
         pda_containers = dict()
-        for block in state.func_ir.blocks.values():
+        for label in labels:
+            block = state.func_ir.blocks[label]
             newbody = list()
             for instr in block.body:
                 if isinstance(instr, nb_ir.Del):
@@ -159,23 +163,25 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                         # loop over the container and decref all elements
 
                         # container variable
-                        cont, tc = pda_containers[ref]
+                        aliases, cont, tc = pda_containers[ref]
 
-                        # load the container cleanup function
-                        cleanup = nb_ir.Var(block.scope, ref+'.cleanup', instr.loc)
-                        state.typemap[cleanup.name] = cleanup_type(state.typingctx, tc)
-                        newbody.append(
-                            nb_ir.Assign(
-                                nb_ir.Global(cleanup.name, cleanup_container, instr.loc),
-                                cleanup, instr.loc
-                            ))
+                        aliases.remove(ref)
+                        if not aliases:
+                            # load the container cleanup function
+                            cleanup = nb_ir.Var(block.scope, ref+'.cleanup', instr.loc)
+                            state.typemap[cleanup.name] = cleanup_type(state.typingctx, tc)
+                            newbody.append(
+                                nb_ir.Assign(
+                                    nb_ir.Global(cleanup.name, cleanup_container, instr.loc),
+                                    cleanup, instr.loc
+                                ))
 
-                        # decref all elements of the container
-                        res = nb_ir.Var(block.scope, ref+'.cleanup_ok', instr.loc)
-                        state.typemap[res.name] = nb_types.bool_
-                        e = nb_ir.Expr.call(cleanup, (cont,), {}, instr.loc)
-                        state.calltypes[e] = nb_typing.signature(nb_types.bool_, tc)
-                        newbody.append(nb_ir.Assign(e, res, instr.loc))
+                            # decref all elements of the container
+                            res = nb_ir.Var(block.scope, ref+'.cleanup_ok', instr.loc)
+                            state.typemap[res.name] = nb_types.bool_
+                            e = nb_ir.Expr.call(cleanup, (cont,), {}, instr.loc)
+                            state.calltypes[e] = nb_typing.signature(nb_types.bool_, tc)
+                            newbody.append(nb_ir.Assign(e, res, instr.loc))
 
                         del pda_containers[ref]
                         newbody.append(instr)
@@ -201,13 +207,14 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 except KeyError:
                                     pass
                         elif expr.op == "getattr":
-                            typ = state.typemap.get(expr.value.name, None)
-                            if self._incref(expr.value.name, instr, state, newbody):
+                            val = expr.value.name
+                            if self._incref(val, instr, state, newbody):
                                 modified = True
                             else:
                                 # capture bound container type functions
+                                typ = state.typemap.get(val, None)
                                 if self._is_pda_container(typ) and expr.attr in ('append',):
-                                    pda_containers[expr.value.name] = (expr.value, typ)
+                                    pda_containers[val] = ({val}, expr.value, typ)
                         elif expr.op == "call":
                             callee = state.typemap.get(expr.func.name, None)
                             if isinstance(callee, nb_types.BoundFunction) and\
@@ -216,15 +223,17 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 if self._incref(vars[1].name, instr, state, newbody):
                                     modified = True
                             else:
-                                typ = state.typemap.get(instr.target.name, None)
+                                # save any returned containers for cleanup
+                                tgt = instr.target.name
+                                typ = state.typemap.get(tgt, None)
                                 if self._is_pda_container(typ):
-                                    pda_containers[instr.target.name] = (instr.target, typ)
+                                    pda_containers[tgt] = ({tgt}, instr.target, typ)
                         elif expr.op in ("static_getitem", "getitem"):
                             # getitem call on containers of PDArray's (PDArray indexing that results
                             # in a PDArray, e.g. slicing, is handled explicitly already)
-                            val = state.typemap.get(expr.value.name, None)
+                            typ = state.typemap.get(expr.value.name, None)
                             ret = state.typemap.get(instr.target.name, None)
-                            if not isinstance(val, PDArrayType) and isinstance(ret, PDArrayType):
+                            if not isinstance(typ, PDArrayType) and isinstance(ret, PDArrayType):
                                 ref_target = nb_ir.Var(instr.target.scope, instr.target.name+'.ref', instr.loc)
                                 state.typemap[ref_target.name] = ret
                                 newbody.append(instr)
@@ -234,16 +243,25 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                                 modified = True
                                 continue    # special case as instr already added to newbody above
                         elif expr.op == "build_list" or expr.op == "build_tuple":
-                            typ = state.typemap.get(instr.target.name, None)
+                            tgt = instr.target.name
+                            typ = state.typemap.get(tgt, None)
                             if self._is_pda_container(typ):
                                 for item in expr.items:
                                     if self._incref(item.name, instr, state, newbody):
                                         modified = True
-                                pda_containers[instr.target.name] = (instr.target, typ)
+                                pda_containers[tgt] = ({tgt}, instr.target, typ)
 
                     elif isinstance(expr, nb_ir.Var):
+                        # TODO: these aliases seem an unnecessary artifact of inlining and
+                        # other codegen passes; it's probably easier/better to clean them up
                         if self._incref(expr.name, instr, state, newbody):
                             modified = True
+                        else:
+                            typ = state.typemap.get(expr.name, None)
+                            if self._is_pda_container(typ):
+                                pda_ref = pda_containers[expr.name]
+                                pda_ref[0].add(instr.target.name)
+                                pda_containers[instr.target.name] = (pda_ref[0], instr.target, typ)
 
                     newbody.append(instr)
 
