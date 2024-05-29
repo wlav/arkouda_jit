@@ -201,8 +201,7 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                             if self._incref(expr.value.name, instr, state, newbody):
                                 modified = True
                             else:      # not a pdarray, but may be a container
-                                try:
-                                    # prevent deletion of the elements
+                                try:   # prevent deletion of its elements
                                     del pda_containers[expr.value.name]
                                 except KeyError:
                                     pass
@@ -245,11 +244,19 @@ class ArkoudaDel(nb_cpl.LoweringPass):
                         elif expr.op == "build_list" or expr.op == "build_tuple":
                             tgt = instr.target.name
                             typ = state.typemap.get(tgt, None)
-                            if self._is_pda_container(typ):
+                            if isinstance(typ, (nb_types.List, nb_types.Tuple, nb_types.UniTuple)):
+                                has_pda = False
                                 for item in expr.items:
                                     if self._incref(item.name, instr, state, newbody):
-                                        modified = True
-                                pda_containers[tgt] = ({tgt}, instr.target, typ)
+                                        has_pda = True
+                                    else:      # not a pdarray, but may be a container
+                                        try:   # assume tuple return and drop container from cleanup
+                                            del pda_containers[item.name]
+                                        except KeyError:
+                                            pass
+                                if has_pda:
+                                    pda_containers[tgt] = ({tgt}, instr.target, typ)
+                                    modified = True
 
                     elif isinstance(expr, nb_ir.Var):
                         # TODO: these aliases seem an unnecessary artifact of inlining and

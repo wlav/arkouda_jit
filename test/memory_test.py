@@ -38,6 +38,9 @@ class MemoryTests(ArkoudaJITTest):
         def calc2():
             return (ak.arange(10), ak.arange(10))
 
+        def calc3():
+            return 1, ak.arange(10)
+
         assert self.verify(locals())
 
     def test_getitem(self):
