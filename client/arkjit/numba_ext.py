@@ -529,10 +529,15 @@ def box_pyobject_with_ref(typ, val, c, pyapi):
     pyapi.incref(boxed)
     return boxed
 
+def unbox_pyobject(typ, val, c):
+    c.pyapi.incref(val)
+    return nb_pyapi.NativeValue(val)
+
 
 def register_aspyobject_model(numba_type):
     nb_ext.register_model(numba_type)(CapsuleModel)
     nb_ext.box(numba_type)(box_pyobject)
+    nb_ext.unbox(numba_type)(unbox_pyobject)
 
 
 register_aspyobject_model(PDArrayType)

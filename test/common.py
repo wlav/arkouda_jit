@@ -29,6 +29,7 @@ class ArkoudaJITTest(ArkoudaTest):
     def compare(self, passes, forg, *args, **kwds):
         mem_level = len(ak.list_symbol_table())
 
+
         self.reset_counters()
         res0 = forg(*args, **kwds)
         self.record_counters(forg, optimized=False)
@@ -71,11 +72,11 @@ class ArkoudaJITTest(ArkoudaTest):
     def record_counters(self, func, optimized):
         self.counts[(func, 'binop', optimized)] = ArkoudaJITTest.binop_counter
 
-    def verify(self, stack, passes="all"):
+    def verify(self, stack, passes="all", args=(), kwds={}):
         if isinstance(stack, dict):
             stack = stack.values()
 
         for i, func in enumerate((f for f in stack if inspect.isfunction(f)), 1):
-            self.compare(passes, func)
+            self.compare(passes, func, *args, **kwds)
 
         return i

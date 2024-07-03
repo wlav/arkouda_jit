@@ -47,3 +47,18 @@ class TypingTests(ArkoudaJITTest):
 
         s = calc1()
         assert type(s) == np.int64
+
+    def test_unboxing(self):
+        """Basic unboxing of pdarrays"""
+
+        def calc1(pda_in, pda_out):
+            for i in range(len(pda_in)):
+                pda_out[i] = 3.14*pda_in[i]
+
+        N = 100
+
+        A = ak.ones(N, dtype=ak.float64)
+        B = ak.arange(N, dtype=ak.float64)
+
+        assert self.verify(locals(), args=(A, B))
+
