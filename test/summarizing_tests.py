@@ -55,3 +55,17 @@ class SummarizingTests(ArkoudaJITTest):
             return ak.value_counts(A)
 
         assert self.verify(locals())
+
+    def test_len(self):
+        """JITing of len()"""
+
+        def calc1():
+            s = 0
+
+            A = ak.ones(10)
+            for i in range(len(A)):
+                s += A[i]
+
+            return s
+
+        assert self.verify(locals())

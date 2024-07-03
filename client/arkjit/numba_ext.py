@@ -68,12 +68,9 @@ class KeywordPlaceholder(nb_types.PyObject):
     pass
 
 
-def register_type(pytype, identifier):
-    @nb_ext.typeof_impl.register(pytype)
-    def typeof_index(val, c) -> nb_types.Type:
-        return identifier
-
-    return identifier
+@nb_ext.typeof_impl.register(ak.pdarrayclass.pdarray)
+def typeof_index(val, c) -> nb_types.Type:
+    return get_pdarray_type(val.dtype)
 
 
 def from_native_with_ref(c, b, pyapi, ty, v, env):
@@ -188,9 +185,9 @@ class PDArrayType(nb_types.Type):
 
         self.dtype = dtype
 
-pdarray_f64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.float64))
-pdarray_i64 = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.int64))
-pdarray_b1  = register_type(ak.pdarrayclass.pdarray, PDArrayType(dtype=nb_types.bool_))
+pdarray_f64 = PDArrayType(dtype=nb_types.float64)
+pdarray_i64 = PDArrayType(dtype=nb_types.int64)
+pdarray_b1  = PDArrayType(dtype=nb_types.bool_)
 assert len(ak_types) == 3    # add pdarray types if more added to ak_types
 pdarray_type = pdarray_f64   # default type
 
@@ -494,9 +491,9 @@ class PDArrayGetItem(nb_tmpl.AbstractTemplate):
         arr_type, idx_type = args
         if isinstance(arr_type, PDArrayType):
             if isinstance(idx_type, nb_types.Integer):
-                return pda_signature("getitem", arr_type.dtype, (arr_type, idx_type))
+                return pda_signature("getitem", arr_type.dtype, args)
             elif isinstance(idx_type, (PDArrayType, nb_types.SliceType)):
-                return pda_signature("getitem", arr_type, (arr_type, idx_type))
+                return pda_signature("getitem", arr_type, args)
 
 @nb_tmpl.infer_global(operator.setitem)
 class PDArraySetItem(nb_tmpl.AbstractTemplate):
@@ -505,7 +502,14 @@ class PDArraySetItem(nb_tmpl.AbstractTemplate):
         arr_type, idx_type, val_type = args
         if isinstance(arr_type, PDArrayType) and \
                 isinstance(idx_type, (PDArrayType, nb_types.Integer, nb_types.SliceType)):
-            return pda_signature("setitem", nb_types.none, (arr_type, idx_type, val_type))
+            return pda_signature("setitem", nb_types.none, args)
+
+@nb_tmpl.infer_global(len)
+class PDArrayLen(nb_tmpl.AbstractTemplate):
+    def generic(self, args: py_typing.Tuple, kwds: py_typing.Dict) -> PDArraySignature:
+        assert not kwds
+        if len(args) == 1 and isinstance(args[0], PDArrayType):
+            return pda_signature("len", nb_types.int64, args)
 
 
 # -- arkouda types lowering -------------------------------------------------
@@ -692,6 +696,10 @@ for idx_type in (PDArrayType, nb_types.Integer, nb_types.SliceType):
     for x in list(ak_types.values()) + [pdarray_type]:
         nb_iutils.lower_builtin(operator.setitem, PDArrayType, idx_type, x)(
             create_lowering_op(operator.setitem, binop=False))
+
+# length
+for x in ak_types.values():
+    nb_iutils.lower_builtin(len, PDArrayType)(create_lowering_op(len, binop=False))
 
 
 # -- automatic overloading of Arkouda APIs ----------------------------------
