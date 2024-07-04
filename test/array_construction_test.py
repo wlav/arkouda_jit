@@ -43,10 +43,10 @@ class ArrayConstructionTests(ArkoudaJITTest):
             return ak.zeros_like(zeros)
 
         def calc3():
-            return ak.zeros(5, dtype=ak.bool)
+            return ak.zeros(5, dtype=ak.bool_)
 
         def calc3a():
-            zeros = ak.zeros(5, dtype=ak.bool)
+            zeros = ak.zeros(5, dtype=ak.bool_)
             return ak.zeros_like(zeros)
 
         def calc4():
@@ -64,10 +64,10 @@ class ArrayConstructionTests(ArkoudaJITTest):
             return ak.ones_like(ones)
 
         def calc6():
-            return ak.ones(5, dtype=ak.bool)
+            return ak.ones(5, dtype=ak.bool_)
 
         def calc6a():
-            ones = ak.ones(5, dtype=ak.bool)
+            ones = ak.ones(5, dtype=ak.bool_)
             return ak.ones_like(ones)
 
         assert self.verify(locals())
@@ -122,7 +122,7 @@ class ArrayConstructionTests(ArkoudaJITTest):
             return ak.randint(1, 5, 3, dtype=ak.float64, seed=2)
 
         def calc3():
-            return ak.randint(1, 5, 10, dtype=ak.bool, seed=2)
+            return ak.randint(1, 5, 10, dtype=ak.bool_, seed=2)
 
         assert self.verify(locals())
 

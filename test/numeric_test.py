@@ -80,7 +80,7 @@ class NumericTests(ArkoudaJITTest):
             return ak.cumsum(ak.uniform(5, 1.0, 5.0, seed=2))
 
         def calc3():
-            return ak.cumsum(ak.randint(0, 1, 5, seed=2, dtype=ak.bool))
+            return ak.cumsum(ak.randint(0, 1, 5, seed=2, dtype=ak.bool_))
 
         def calc4():
             return ak.cumprod(ak.arange(1, 5))

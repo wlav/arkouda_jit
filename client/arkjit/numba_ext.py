@@ -196,7 +196,7 @@ def get_pdarray_type(dtype):
         return pdarray_f64
     elif dtype == ak.int64 or dtype == np.int64:
         return pdarray_i64
-    elif dtype == ak.bool  or dtype == np.bool_:
+    elif dtype == np.bool_:
         return pdarray_b1
     return pdarray_type
 
@@ -437,12 +437,17 @@ def create_annotated_overload(func: py_typing.Callable) -> None:
                 return_type = nb_types.Tuple(rtargs)
             else:
                 # some heuristics
-                if len(typed_args) == 1 and isinstance(typed_args[0], nb_types.containers.List):
-                    # operations on a list of arrays; returns the same type of array
-                    # TODO: a common alternative is to return ak.Strings when given
-                    # ak.pdarray's as input; would need to specialize on the dtype
-                    # of the array to capture those
-                    return_type = args[0].key[0]
+                if len(typed_args) == 1:
+                    if isinstance(typed_args[0], nb_types.containers.List):
+                        # operations on a list of arrays; returns the same type of array
+                        # TODO: a common alternative is to return ak.Strings when given
+                        # ak.pdarray's as input; would need to specialize on the dtype
+                        # of the array to capture those
+                        return_type = args[0].key[0]
+                    elif isinstance(typed_args[0], PDArrayType) and \
+                            pysig.return_annotation == "numeric_and_bool_scalars":
+                        # return value is a dtype; typically, it matches the argument
+                        return_type = typed_args[0].dtype
 
             if return_type is None:
                 return_type = opaque_py_type

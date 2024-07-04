@@ -67,14 +67,14 @@ class IndexingTests(ArkoudaJITTest):
 
         def calc1():
             A = ak.arange(0, 10, 1)
-            inds = ak.zeros(10, dtype=ak.bool)
+            inds = ak.zeros(10, dtype=ak.bool_)
             inds[2] = True
             inds[5] = True
             return A[inds]
 
         def calc1a():
             A = ak.arange(0, 10, 1)
-            inds = ak.zeros(10, dtype=ak.bool)
+            inds = ak.zeros(10, dtype=ak.bool_)
             inds[2] = True
             inds[5] = True
             A[inds] = 42
